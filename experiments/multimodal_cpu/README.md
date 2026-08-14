@@ -54,3 +54,23 @@ the vLLM run when those processor overrides are configured.
    embedding integration, language-model prefill, and first-token work.
 5. Run hardware measurements on the target Kunpeng/Ascend host. Source-only
    checks on Windows do not constitute performance results.
+
+## ViT layer and operator profile
+
+This branch adds profiler scopes to Qwen2.5-VL's input cast, PatchEmbed,
+metadata preparation, token reorder, every ViT block, merger, and output reorder.
+The scopes are inactive unless the existing
+`VLLM_CUSTOM_SCOPES_FOR_PROFILING` switch is enabled; the runner enables it
+before importing vLLM.
+
+```bash
+python -m experiments.multimodal_cpu.run_vit_profile \
+  --model /path/to/Qwen2.5-VL-7B-Instruct \
+  --image /data/image.jpg \
+  --profile-dir /results/vit_profile_2k
+```
+
+Open the generated torch-npu trace in the supported profiler UI and filter for
+`mm.vit.`. Compare NPU kernels nested beneath each scope; the host duration of a
+scope alone must not be reported as NPU execution time because NPU launches are
+asynchronous.

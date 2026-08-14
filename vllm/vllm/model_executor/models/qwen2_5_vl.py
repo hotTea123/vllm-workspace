@@ -87,6 +87,7 @@ from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.utils import record_function_or_nullcontext
 from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphReplayBuffers
 
 from .interfaces import (
@@ -511,16 +512,18 @@ class Qwen2_5_VisionBlock(nn.Module):
         # Only used for FlashInfer CuDNN backend.
         sequence_lengths: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        x_attn = self.attn(
-            self.norm1(x),
-            cu_seqlens=cu_seqlens,
-            rotary_pos_emb_cos=rotary_pos_emb_cos,
-            rotary_pos_emb_sin=rotary_pos_emb_sin,
-            max_seqlen=max_seqlen,
-            sequence_lengths=sequence_lengths,
-        )
-        x_fused_norm, residual = self.norm2(x, residual=x_attn)
-        x = residual + self.mlp(x_fused_norm)
+        with record_function_or_nullcontext("mm.vit.block.attention"):
+            x_attn = self.attn(
+                self.norm1(x),
+                cu_seqlens=cu_seqlens,
+                rotary_pos_emb_cos=rotary_pos_emb_cos,
+                rotary_pos_emb_sin=rotary_pos_emb_sin,
+                max_seqlen=max_seqlen,
+                sequence_lengths=sequence_lengths,
+            )
+        with record_function_or_nullcontext("mm.vit.block.mlp"):
+            x_fused_norm, residual = self.norm2(x, residual=x_attn)
+            x = residual + self.mlp(x_fused_norm)
         return x
 
 
@@ -1061,12 +1064,15 @@ class Qwen2_5_VisionTransformer(nn.Module):
         *,
         encoder_metadata: dict[str, torch.Tensor] | None = None,
     ) -> torch.Tensor:
-        hidden_states = x.to(device=self.device, dtype=self.dtype)
-        hidden_states = self.patch_embed(hidden_states)
+        with record_function_or_nullcontext("mm.vit.input_cast"):
+            hidden_states = x.to(device=self.device, dtype=self.dtype)
+        with record_function_or_nullcontext("mm.vit.patch_embed"):
+            hidden_states = self.patch_embed(hidden_states)
 
         seq_len = hidden_states.shape[0]
         if encoder_metadata is None:
-            encoder_metadata = self.prepare_encoder_metadata(grid_thw)
+            with record_function_or_nullcontext("mm.vit.encoder_metadata"):
+                encoder_metadata = self.prepare_encoder_metadata(grid_thw)
 
         rotary_pos_emb_cos = encoder_metadata["rotary_pos_emb_cos"]
         rotary_pos_emb_sin = encoder_metadata["rotary_pos_emb_sin"]
@@ -1079,41 +1085,49 @@ class Qwen2_5_VisionTransformer(nn.Module):
         sequence_lengths_full = encoder_metadata.get("sequence_lengths_full")
         sequence_lengths_window = encoder_metadata.get("sequence_lengths_window")
 
-        hidden_states = hidden_states.reshape(
-            seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1
-        )
-        hidden_states = hidden_states[window_index, :, :]
-        hidden_states = hidden_states.reshape(seq_len, -1)
+        with record_function_or_nullcontext("mm.vit.window_reorder"):
+            hidden_states = hidden_states.reshape(
+                seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1
+            )
+            hidden_states = hidden_states[window_index, :, :]
+            hidden_states = hidden_states.reshape(seq_len, -1)
 
         hidden_states = hidden_states.unsqueeze(1)
 
         for layer_num, blk in enumerate(self.blocks):
             if layer_num in self.fullatt_block_indexes:
+                attention_kind = "full"
                 cu_seqlens_now = cu_seqlens
                 max_seqlen_now = max_seqlen_full
                 sequence_lengths_now = sequence_lengths_full
             else:
+                attention_kind = "window"
                 cu_seqlens_now = cu_window_seqlens
                 max_seqlen_now = max_seqlen_window
                 sequence_lengths_now = sequence_lengths_window
 
-            hidden_states = blk(
-                hidden_states,
-                cu_seqlens=cu_seqlens_now,
-                rotary_pos_emb_cos=rotary_pos_emb_cos,
-                rotary_pos_emb_sin=rotary_pos_emb_sin,
-                max_seqlen=max_seqlen_now,
-                sequence_lengths=sequence_lengths_now,
-            )
+            scope_name = f"mm.vit.block.{layer_num:02d}.{attention_kind}"
+            with record_function_or_nullcontext(scope_name):
+                hidden_states = blk(
+                    hidden_states,
+                    cu_seqlens=cu_seqlens_now,
+                    rotary_pos_emb_cos=rotary_pos_emb_cos,
+                    rotary_pos_emb_sin=rotary_pos_emb_sin,
+                    max_seqlen=max_seqlen_now,
+                    sequence_lengths=sequence_lengths_now,
+                )
 
         # For Qwen2.5-VL-3B, float16 will overflow at last block
         # for long visual tokens sequences.
         if hidden_states.dtype == torch.float16:
-            hidden_states = cast_overflow_tensors(hidden_states)
+            with record_function_or_nullcontext("mm.vit.cast_overflow"):
+                hidden_states = cast_overflow_tensors(hidden_states)
 
         # adapter
-        hidden_states = self.merger(hidden_states)
-        hidden_states = hidden_states[reverse_indices, :]
+        with record_function_or_nullcontext("mm.vit.merger"):
+            hidden_states = self.merger(hidden_states)
+        with record_function_or_nullcontext("mm.vit.restore_order"):
+            hidden_states = hidden_states[reverse_indices, :]
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
