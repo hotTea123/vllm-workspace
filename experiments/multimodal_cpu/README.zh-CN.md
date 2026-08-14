@@ -50,3 +50,23 @@ UTF-8 CSV 文件。如果 vLLM 实验配置了 `min_pixels` 和 `max_pixels`，�
    融合、语言模型 Prefill 和首 Token 生成，不能把它直接标为纯 Prefill。
 5. 硬件性能必须在目标鲲鹏/昇腾主机上测量；Windows 上的源码检查不能作为
    性能结果。
+
+## ViT 权重与 KV Cache 容量分析
+
+该分支在不加载 Tensor 的情况下读取 safetensors 元数据，按组件汇总视觉
+权重，计算每张 NPU 上每个 Token 的 KV Cache 字节数，并把视觉权重字节数
+换算为等价的 KV Token 容量范围。
+
+```bash
+python -m experiments.multimodal_cpu.analyze_memory_kv \
+  --model /path/to/Qwen2.5-VL-7B-Instruct \
+  --tensor-parallel-size 1 \
+  --kv-dtype bfloat16 \
+  --tokens-per-request 8192 \
+  --output-prefix /results/qwen25vl_7b_memory_kv
+```
+
+结果使用范围而不是单点值：下界假设视觉权重在 TP Rank 之间均匀切分，上界
+假设视觉权重在各 Rank 上复制。Checkpoint 字节数不包含内存分配器对齐、
+运行时Workspace和峰值激活，因此必须与 `npu-smi` 观测到的进程显存分开
+报告。
