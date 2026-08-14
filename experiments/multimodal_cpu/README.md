@@ -54,3 +54,28 @@ the vLLM run when those processor overrides are configured.
    embedding integration, language-model prefill, and first-token work.
 5. Run hardware measurements on the target Kunpeng/Ascend host. Source-only
    checks on Windows do not constitute performance results.
+
+## CPU roofline probe
+
+This branch does not move ViT to CPU. It measures sustained CPU memory-copy and
+GEMM throughput with the real pre-merge patch count and Qwen vision dimensions.
+Use the target runtime's PyTorch CPU backend so the result includes the kernels
+and SVE support that a future offload implementation would actually use.
+
+```bash
+numactl --cpunodebind=0 --membind=0 \
+  python -m experiments.multimodal_cpu.bench_cpu_roofline \
+  --input-scale-jsonl /results/qwen25vl_2k_input_scale.jsonl \
+  --model /path/to/Qwen2.5-VL-7B-Instruct \
+  --dtype bfloat16 \
+  --threads 1,8,16,32,64 \
+  --output-prefix /results/qwen25vl_2k_cpu_roofline
+```
+
+The four GEMMs represent QKV projection, attention output projection, MLP
+gate/up projection, and MLP down projection. The benchmark intentionally uses
+`patch_count`, not post-merge visual tokens, because Qwen2.5-VL's transformer
+blocks run before the patch merger. Run `perf stat` around this command to verify
+cycles, instructions, cache misses, and available Arm vector events. A fast
+roofline result is only a lower bound; it is not evidence that a complete CPU
+ViT will reach the same latency.
