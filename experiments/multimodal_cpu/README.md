@@ -54,3 +54,23 @@ the vLLM run when those processor overrides are configured.
    embedding integration, language-model prefill, and first-token work.
 5. Run hardware measurements on the target Kunpeng/Ascend host. Source-only
    checks on Windows do not constitute performance results.
+
+## ViT weight and KV-capacity analysis
+
+This branch reads safetensors metadata without loading tensors, sums vision
+weights by component, calculates KV bytes per token per NPU, and converts the
+weight bytes into an equivalent KV-token range.
+
+```bash
+python -m experiments.multimodal_cpu.analyze_memory_kv \
+  --model /path/to/Qwen2.5-VL-7B-Instruct \
+  --tensor-parallel-size 1 \
+  --kv-dtype bfloat16 \
+  --tokens-per-request 8192 \
+  --output-prefix /results/qwen25vl_7b_memory_kv
+```
+
+The range is deliberate: the lower endpoint assumes vision weights are evenly
+TP-sharded and the upper endpoint assumes they are replicated. Checkpoint bytes
+do not include allocator alignment, runtime workspaces, or peak activations, so
+report them separately from observed `npu-smi` process memory.
