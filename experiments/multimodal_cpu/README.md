@@ -76,6 +76,9 @@ The raw rows contain `preprocessor_total_ms`, individual processor stages,
 time. `encoder_forward_ms` is the synchronized whole encoder path; use the ViT
 layer-profile branch for a pure stage/operator breakdown.
 
+The branch also delegates the upstream encoder timing RPC through Ascend's
+`NPUWorker`; it does not add a second timer to the hot path.
+
 For full process-tree CPU and NPU utilization, run the experiment under the
 host's `pidstat`/`perf` and `npu-smi` collectors. Parent-process CPU time alone is
 not representative because vLLM workers may be separate processes.
