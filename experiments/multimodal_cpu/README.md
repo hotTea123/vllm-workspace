@@ -54,3 +54,28 @@ the vLLM run when those processor overrides are configured.
    embedding integration, language-model prefill, and first-token work.
 5. Run hardware measurements on the target Kunpeng/Ascend host. Source-only
    checks on Windows do not constitute performance results.
+
+## NPU single-request baseline
+
+This branch fixes output length at 256 tokens, disables multimodal processor and
+prefix caches, resets the encoder cache before every sample, and verifies one
+encoder invocation per request.
+
+```bash
+python -m experiments.multimodal_cpu.run_npu_baseline \
+  --model /path/to/Qwen2.5-VL-7B-Instruct \
+  --image /data/image.jpg \
+  --tensor-parallel-size 1 \
+  --warmups 2 \
+  --repeats 10 \
+  --output-prefix /results/qwen25vl_7b_2k
+```
+
+The raw rows contain `preprocessor_total_ms`, individual processor stages,
+`encoder_forward_ms`, TTFT, TPOT, queue time, engine E2E time, and caller wall
+time. `encoder_forward_ms` is the synchronized whole encoder path; use the ViT
+layer-profile branch for a pure stage/operator breakdown.
+
+For full process-tree CPU and NPU utilization, run the experiment under the
+host's `pidstat`/`perf` and `npu-smi` collectors. Parent-process CPU time alone is
+not representative because vLLM workers may be separate processes.
