@@ -50,3 +50,30 @@ UTF-8 CSV 文件。如果 vLLM 实验配置了 `min_pixels` 和 `max_pixels`，�
    融合、语言模型 Prefill 和首 Token 生成，不能把它直接标为纯 Prefill。
 5. 硬件性能必须在目标鲲鹏/昇腾主机上测量；Windows 上的源码检查不能作为
    性能结果。
+
+## NPU 单请求基线
+
+该分支将输出长度固定为 256 Token，关闭多模态处理器缓存和 Prefix Cache，
+在每个样本前重置 Encoder Cache，并验证每个请求只执行一次 Encoder。
+
+```bash
+python -m experiments.multimodal_cpu.run_npu_baseline \
+  --model /path/to/Qwen2.5-VL-7B-Instruct \
+  --image /data/image.jpg \
+  --tensor-parallel-size 1 \
+  --warmups 2 \
+  --repeats 10 \
+  --output-prefix /results/qwen25vl_7b_2k
+```
+
+原始记录包含 `preprocessor_total_ms`、各预处理阶段时间、
+`encoder_forward_ms`、TTFT、TPOT、排队时间、引擎端到端时间和调用方观测的
+Wall Time。`encoder_forward_ms` 是同步后的完整 Encoder 路径时间；纯 ViT
+阶段和算子拆解应使用 ViT 层级分析分支。
+
+该分支还通过昇腾 `NPUWorker` 委托调用上游已有的 Encoder 计时 RPC，未在
+推理热路径中增加第二套计时器。
+
+如需采集完整进程树的 CPU 和 NPU 利用率，应在主机侧同时运行 `pidstat`/
+`perf` 和 `npu-smi`。vLLM Worker 可能运行在独立进程中，因此仅统计父进程
+CPU 时间不具有代表性。
