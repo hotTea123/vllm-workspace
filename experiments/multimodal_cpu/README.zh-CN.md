@@ -50,3 +50,22 @@ UTF-8 CSV 文件。如果 vLLM 实验配置了 `min_pixels` 和 `max_pixels`，�
    融合、语言模型 Prefill 和首 Token 生成，不能把它直接标为纯 Prefill。
 5. 硬件性能必须在目标鲲鹏/昇腾主机上测量；Windows 上的源码检查不能作为
    性能结果。
+
+## CPU/NPU 传输测试
+
+该分支测量真实处理器 Pixel Tensor、完整卸载后的 Encoder 输出，以及一个
+具有代表性的部分卸载 ViT 中间激活的同步 H2D、D2H 和往返时延。同时测试
+1/4/16/64/256 MiB 五种负载大小，用于拟合固定传输开销和有效带宽。
+
+```bash
+python -m experiments.multimodal_cpu.bench_npu_transfer \
+  --input-scale-jsonl /results/qwen25vl_2k_input_scale.jsonl \
+  --model /path/to/Qwen2.5-VL-7B-Instruct \
+  --device npu:0 \
+  --model-dtype bfloat16 \
+  --output-prefix /results/qwen25vl_2k_transfer
+```
+
+默认使用 Pinned Memory，因为 vLLM 的异步传输会在可用时使用锁页主机内存。
+可以增加 `--pageable` 重复测试，以量化普通分页内存的额外代价。每个计时样本
+都会在拷贝前后进行同步，因此得到的是适用于保守理论模型的阻塞传输成本。
