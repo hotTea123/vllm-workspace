@@ -54,3 +54,24 @@ the vLLM run when those processor overrides are configured.
    embedding integration, language-model prefill, and first-token work.
 5. Run hardware measurements on the target Kunpeng/Ascend host. Source-only
    checks on Windows do not constitute performance results.
+
+## CPU/NPU transfer probe
+
+This branch measures synchronized H2D, D2H, and round-trip latency for the real
+processor Pixel Tensor, full-offload encoder output, and a representative
+partial-offload ViT activation. A 1/4/16/64/256 MiB sweep provides enough points
+to fit fixed overhead plus effective bandwidth.
+
+```bash
+python -m experiments.multimodal_cpu.bench_npu_transfer \
+  --input-scale-jsonl /results/qwen25vl_2k_input_scale.jsonl \
+  --model /path/to/Qwen2.5-VL-7B-Instruct \
+  --device npu:0 \
+  --model-dtype bfloat16 \
+  --output-prefix /results/qwen25vl_2k_transfer
+```
+
+Pinned memory is the default because asynchronous vLLM transfers use pinned
+host buffers where available. Repeat with `--pageable` to quantify the penalty.
+Every timed sample synchronizes before and after the copy, so the result is a
+blocking transfer cost suitable for the conservative theoretical model.
