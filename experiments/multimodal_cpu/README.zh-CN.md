@@ -50,3 +50,24 @@ UTF-8 CSV 文件。如果 vLLM 实验配置了 `min_pixels` 和 `max_pixels`，�
    融合、语言模型 Prefill 和首 Token 生成，不能把它直接标为纯 Prefill。
 5. 硬件性能必须在目标鲲鹏/昇腾主机上测量；Windows 上的源码检查不能作为
    性能结果。
+
+## 闭合批次并发扫描
+
+该分支为每次分组后的 Encoder 调用增加一条结构化记录，包括批次 ID、请求
+ID、媒体项数量、合并后的 Encoder Token 数和同步批次时间。同时为昇腾
+Worker 补充对上游已有逐请求 Encoder 计时注册表的委托接口。
+
+```bash
+python -m experiments.multimodal_cpu.run_concurrency \
+  --model /path/to/Qwen2.5-VL-7B-Instruct \
+  --image /data/image.jpg \
+  --concurrency 1,4,8,16 \
+  --repeats 3 \
+  --output-prefix /results/qwen25vl_7b_concurrency
+```
+
+同一个并发级别下的所有请求会在离线引擎循环开始前提交，因此该实验测量的
+是闭合批次和引擎真实的 Encoder 分组行为，不包含网络请求到达模式。开放式
+在线负载应另行使用 `vllm bench serve` 测试；本分支得到的批处理服务曲线
+用于卸载理论模型。实验期间应同时运行 `pidstat`/`perf` 和 `npu-smi`，采集
+完整进程树的 CPU 与 NPU 利用率。
