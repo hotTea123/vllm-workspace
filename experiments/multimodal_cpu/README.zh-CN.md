@@ -50,3 +50,21 @@ UTF-8 CSV 文件。如果 vLLM 实验配置了 `min_pixels` 和 `max_pixels`，�
    融合、语言模型 Prefill 和首 Token 生成，不能把它直接标为纯 Prefill。
 5. 硬件性能必须在目标鲲鹏/昇腾主机上测量；Windows 上的源码检查不能作为
    性能结果。
+
+## ViT 层级与算子分析
+
+该分支为 Qwen2.5-VL 的输入类型转换、PatchEmbed、元数据准备、Token 重排、
+每个 ViT Block、Merger 和输出重排增加 Profiler 范围。只有启用已有的
+`VLLM_CUSTOM_SCOPES_FOR_PROFILING` 开关时这些范围才会生效；运行脚本会在
+导入 vLLM 前自动启用该开关。
+
+```bash
+python -m experiments.multimodal_cpu.run_vit_profile \
+  --model /path/to/Qwen2.5-VL-7B-Instruct \
+  --image /data/image.jpg \
+  --profile-dir /results/vit_profile_2k
+```
+
+使用受支持的 Profiler 界面打开生成的 torch-npu Trace，并按 `mm.vit.`
+过滤。应比较每个范围下实际嵌套的 NPU Kernel；由于 NPU 算子是异步下发的，
+不能把某个范围的主机侧持续时间直接报告为 NPU 执行时间。
