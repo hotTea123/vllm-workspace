@@ -54,3 +54,26 @@ the vLLM run when those processor overrides are configured.
    embedding integration, language-model prefill, and first-token work.
 5. Run hardware measurements on the target Kunpeng/Ascend host. Source-only
    checks on Windows do not constitute performance results.
+
+## Closed-batch concurrency sweep
+
+This branch adds one structured record per grouped encoder invocation: batch ID,
+request IDs, number of media items, post-merge encoder tokens, and synchronized
+batch time. It also adds the missing Ascend worker delegation for the existing
+per-request encoder timing registry.
+
+```bash
+python -m experiments.multimodal_cpu.run_concurrency \
+  --model /path/to/Qwen2.5-VL-7B-Instruct \
+  --image /data/image.jpg \
+  --concurrency 1,4,8,16 \
+  --repeats 3 \
+  --output-prefix /results/qwen25vl_7b_concurrency
+```
+
+All requests at one level are submitted before the offline engine loop runs, so
+this measures a closed batch and the engine's real encoder grouping. It does not
+model network arrival patterns. Use `vllm bench serve` separately for an open
+online load test, and retain this branch's batch service curve for the offload
+model. Run `pidstat`/`perf` and `npu-smi` alongside the sweep for process-tree CPU
+and NPU utilization.

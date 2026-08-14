@@ -712,6 +712,8 @@ class GPUModelRunner(
 
         # Encoder timing registry for observability
         self.encoder_timing_registry: dict[str, EncoderTimingStats] = {}
+        self.encoder_batch_timing_registry: list[EncoderBatchTimingStats] = []
+        self._encoder_batch_counter = 0
         self._encoder_timing_lock = threading.Lock()
 
         # Persistent buffers for CUDA graphs.
@@ -7499,6 +7501,16 @@ class GPUModelRunner(
             self.encoder_timing_registry.clear()
             return stats
 
+    def get_encoder_batch_timing_stats(self) -> list[dict[str, Any]]:
+        """Get synchronized encoder batch timing stats and clear the registry."""
+        with self._encoder_timing_lock:
+            stats = [
+                stats_obj.to_dict()
+                for stats_obj in self.encoder_batch_timing_registry
+            ]
+            self.encoder_batch_timing_registry.clear()
+            return stats
+
     @contextmanager
     def timed_encoder_operation(
         self,
@@ -7522,6 +7534,9 @@ class GPUModelRunner(
 
         group_refs = group_lora_refs[current_item_idx : current_item_idx + num_items]
         group_request_ids = {req_id for req_id, _ in group_refs}
+        group_encoder_tokens = sum(
+            pos_info.get_num_embeds() for _, pos_info in group_refs
+        )
 
         torch.accelerator.synchronize()
         start_time = time.perf_counter()
@@ -7535,6 +7550,17 @@ class GPUModelRunner(
             per_request_time = elapsed / max(len(group_request_ids), 1)
 
             with self._encoder_timing_lock:
+                self.encoder_batch_timing_registry.append(
+                    EncoderBatchTimingStats(
+                        batch_id=self._encoder_batch_counter,
+                        encoder_forward_secs=elapsed,
+                        num_items=num_items,
+                        num_requests=len(group_request_ids),
+                        num_encoder_tokens=group_encoder_tokens,
+                        request_ids=sorted(group_request_ids),
+                    )
+                )
+                self._encoder_batch_counter += 1
                 for req_id in group_request_ids:
                     if req_id not in self.encoder_timing_registry:
                         self.encoder_timing_registry[req_id] = EncoderTimingStats()
@@ -7558,4 +7584,26 @@ class EncoderTimingStats:
         return {
             "encoder_forward_secs": self.encoder_forward_secs,
             "num_encoder_calls": self.num_encoder_calls,
+        }
+
+
+@dataclass
+class EncoderBatchTimingStats:
+    """Timing and workload metadata for one grouped encoder invocation."""
+
+    batch_id: int
+    encoder_forward_secs: float
+    num_items: int
+    num_requests: int
+    num_encoder_tokens: int
+    request_ids: list[str]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "batch_id": self.batch_id,
+            "encoder_forward_secs": self.encoder_forward_secs,
+            "num_items": self.num_items,
+            "num_requests": self.num_requests,
+            "num_encoder_tokens": self.num_encoder_tokens,
+            "request_ids": self.request_ids,
         }
