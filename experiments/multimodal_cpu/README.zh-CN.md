@@ -77,3 +77,7 @@ python -m experiments.multimodal_cpu.run_vit_profile \
 使用受支持的 Profiler 界面打开生成的 torch-npu Trace，并按 `mm.vit.`
 过滤。应比较每个范围下实际嵌套的 NPU Kernel；由于 NPU 算子是异步下发的，
 不能把某个范围的主机侧持续时间直接报告为 NPU 执行时间。
+
+Manifest 中的 `input_scale` 来自本次 Profile 的真实 Encoder 调用。
+`input_scale_estimate` 和 `input_scale_comparison` 仅用于展示估算差异，不能
+替代运行时实际值。

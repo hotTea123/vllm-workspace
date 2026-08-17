@@ -11,7 +11,10 @@ from types import SimpleNamespace
 
 from experiments.multimodal_cpu.collect_input_scale import collect as collect_scale
 from experiments.multimodal_cpu.common import (
+    collect_encoder_batch_stats,
+    compare_input_scales,
     load_image_with_metrics,
+    runtime_input_scale_from_batch,
     write_csv,
     write_jsonl,
 )
@@ -60,7 +63,7 @@ def main() -> None:
         }.items()
         if value is not None
     }
-    scale = collect_scale(
+    scale_estimate = collect_scale(
         SimpleNamespace(
             model=args.model,
             image=args.image,
@@ -79,6 +82,7 @@ def main() -> None:
         mm_processor_kwargs=mm_processor_kwargs,
         mm_processor_cache_gb=0,
         enable_prefix_caching=False,
+        enable_mm_processor_stats=True,
         limit_mm_per_prompt={"image": 1},
         enforce_eager=True,
         profiler_config={
@@ -97,18 +101,45 @@ def main() -> None:
         "prompt": qwen_prompt(args.prompt),
         "multi_modal_data": {"image": image},
     }
+    vision_config = llm.llm_engine.vllm_config.model_config.hf_config.vision_config
+    patch_size = int(vision_config.patch_size)
+    spatial_merge_size = int(vision_config.spatial_merge_size)
 
     for _ in range(args.warmups):
         llm.reset_mm_cache()
         llm.llm_engine.reset_encoder_cache()
         llm.generate([request], sampling_params, use_tqdm=False)
 
+    from vllm.benchmarks.mm_processor import get_timing_stats_from_engine
+
+    get_timing_stats_from_engine(llm.llm_engine)
+    collect_encoder_batch_stats(llm)
+
     llm.reset_mm_cache()
     llm.llm_engine.reset_encoder_cache()
     llm.start_profile()
-    llm.generate([request], sampling_params, use_tqdm=False)
+    outputs = llm.generate([request], sampling_params, use_tqdm=False)
     llm.stop_profile()
     time.sleep(2)
+
+    get_timing_stats_from_engine(llm.llm_engine)
+    encoder_batches = collect_encoder_batch_stats(llm)
+    if not encoder_batches:
+        raise RuntimeError("No runtime encoder batch metadata was collected.")
+    first_rank = min(int(batch["worker_rank"]) for batch in encoder_batches)
+    first_rank_batches = [
+        batch
+        for batch in encoder_batches
+        if int(batch["worker_rank"]) == first_rank
+    ]
+    if len(first_rank_batches) != 1:
+        raise RuntimeError(
+            "Expected one profiled encoder batch on the representative worker, "
+            f"got {len(first_rank_batches)}."
+        )
+    input_scale = runtime_input_scale_from_batch(
+        first_rank_batches[0], patch_size, spatial_merge_size
+    )
 
     manifest = {
         "experiment": "vit_layer_profile",
@@ -116,7 +147,13 @@ def main() -> None:
         "tensor_parallel_size": args.tensor_parallel_size,
         "profile_dir": str(profile_dir),
         "media": media_metrics,
-        "input_scale": scale,
+        "request_id": outputs[0].request_id,
+        "input_scale": input_scale,
+        "input_scale_estimate": scale_estimate,
+        "input_scale_comparison": compare_input_scales(
+            input_scale, scale_estimate
+        ),
+        "encoder_batches": encoder_batches,
         "scope_prefix": "mm.vit.",
     }
     write_jsonl(profile_dir / "manifest.jsonl", [manifest])

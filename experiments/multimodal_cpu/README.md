@@ -84,3 +84,7 @@ Open the generated torch-npu trace in the supported profiler UI and filter for
 `mm.vit.`. Compare NPU kernels nested beneath each scope; the host duration of a
 scope alone must not be reported as NPU execution time because NPU launches are
 asynchronous.
+
+The manifest uses runtime `input_scale` captured from the profiled encoder call.
+The independent `input_scale_estimate` and `input_scale_comparison` fields are
+kept only to expose differences and never replace the runtime values.
