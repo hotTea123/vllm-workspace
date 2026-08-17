@@ -58,6 +58,172 @@ def tensor_metadata(tensor: Any) -> dict[str, Any]:
     }
 
 
+def normalize_internal_request_id(request_id: str) -> str:
+    """Strip the V1 engine's eight-character request-id suffix."""
+    external_id, separator, suffix = request_id.rpartition("-")
+    if separator and external_id and len(suffix) == 8:
+        return external_id
+    return request_id
+
+
+def merge_request_stage_stats(
+    all_stats: Mapping[str, Mapping[str, Any]], request_ids: Sequence[str]
+) -> dict[str, dict[str, Any]]:
+    """Associate offline renderer and encoder stats with output request IDs.
+
+    Offline ``LLM.generate`` renders prompts in input order. Preprocessor stats
+    use renderer-local IDs, while encoder stats use randomized internal request
+    IDs. This preserves that ordering invariant without requiring those
+    unrelated ID domains to match.
+    """
+    merged = {request_id: {} for request_id in request_ids}
+    unassigned_preprocessor: list[Mapping[str, Any]] = []
+
+    for stats_id, stats in all_stats.items():
+        normalized_id = normalize_internal_request_id(stats_id)
+        target_id = normalized_id if normalized_id in merged else None
+        if target_id is not None:
+            merged[target_id].update(stats)
+        elif "preprocessor_total_secs" in stats:
+            unassigned_preprocessor.append(stats)
+
+    missing_preprocessor_ids = [
+        request_id
+        for request_id in request_ids
+        if "preprocessor_total_secs" not in merged[request_id]
+    ]
+    for request_id, stats in zip(
+        missing_preprocessor_ids, unassigned_preprocessor, strict=False
+    ):
+        merged[request_id].update(stats)
+
+    return merged
+
+
+def collect_encoder_batch_stats(llm: Any) -> list[dict[str, Any]]:
+    """Drain actual encoder batch metadata from every model worker."""
+    worker_stats = llm.llm_engine.collective_rpc(
+        "get_encoder_batch_timing_stats"
+    )
+    return [
+        {**item, "worker_rank": worker_rank}
+        for worker_rank, rank_stats in enumerate(worker_stats)
+        for item in rank_stats
+    ]
+
+
+def runtime_input_scale_from_batch(
+    batch: Mapping[str, Any], patch_size: int, spatial_merge_size: int
+) -> dict[str, Any]:
+    """Build authoritative Qwen-VL input scale from one runtime batch."""
+    grid = [[int(dim) for dim in item] for item in batch.get("grid_thw", [])]
+    patch_count = sum(t * h * w for t, h, w in grid)
+    processed_items = [
+        {
+            "processed_width": w * patch_size,
+            "processed_height": h * patch_size,
+        }
+        for _, h, w in grid
+    ]
+    input_tensors = dict(batch.get("input_tensors", {}))
+    pixel_values = input_tensors.get("pixel_values")
+    if pixel_values is None:
+        pixel_values = input_tensors.get("pixel_values_videos")
+
+    output_tensors = list(batch.get("output_tensors", []))
+    encoder_output: dict[str, Any] = {
+        "items": output_tensors,
+        "tensor_bytes": int(batch.get("output_tensor_bytes", 0)),
+    }
+    if len(output_tensors) == 1:
+        encoder_output.update(output_tensors[0])
+
+    result = {
+        "source": "vllm_runtime",
+        "worker_rank": int(batch.get("worker_rank", 0)),
+        "encoder_batch_id": int(batch["batch_id"]),
+        "modality": batch.get("modality"),
+        "num_items": int(batch.get("num_items", len(grid))),
+        "grid_thw": grid,
+        "patch_size": patch_size,
+        "patch_count": patch_count,
+        "spatial_merge_size": spatial_merge_size,
+        "visual_token_count": int(batch.get("num_encoder_tokens", 0)),
+        "processed_items": processed_items,
+        "pixel_values": pixel_values,
+        "encoder_input_tensors": input_tensors,
+        "encoder_input_tensor_bytes": int(batch.get("input_tensor_bytes", 0)),
+        "encoder_output": encoder_output,
+    }
+    if len(processed_items) == 1:
+        result.update(processed_items[0])
+    return result
+
+
+def compare_input_scales(
+    actual: Mapping[str, Any], estimate: Mapping[str, Any]
+) -> dict[str, dict[str, Any]]:
+    """Return differences without treating an estimate mismatch as failure."""
+
+    def nested(source: Mapping[str, Any], path: tuple[str, ...]) -> Any:
+        value: Any = source
+        for key in path:
+            if not isinstance(value, Mapping) or key not in value:
+                return None
+            value = value[key]
+        return value
+
+    fields = {
+        "processed_width": (("processed_width",), ("processed_width",)),
+        "processed_height": (("processed_height",), ("processed_height",)),
+        "grid_thw": (("grid_thw",), ("grid_thw",)),
+        "patch_count": (("patch_count",), ("patch_count",)),
+        "visual_token_count": (
+            ("visual_token_count",),
+            ("visual_token_count",),
+        ),
+        "pixel_values.shape": (
+            ("pixel_values", "shape"),
+            ("pixel_values", "shape"),
+        ),
+        "pixel_values.dtype": (
+            ("pixel_values", "dtype"),
+            ("pixel_values", "dtype"),
+        ),
+        "pixel_values.tensor_bytes": (
+            ("pixel_values", "tensor_bytes"),
+            ("pixel_values", "tensor_bytes"),
+        ),
+        "encoder_output.shape": (
+            ("encoder_output", "shape"),
+            ("encoder_output_estimate", "shape"),
+        ),
+        "encoder_output.tensor_bytes": (
+            ("encoder_output", "tensor_bytes"),
+            ("encoder_output_estimate", "tensor_bytes"),
+        ),
+    }
+    comparison: dict[str, dict[str, Any]] = {}
+    for name, (actual_path, estimate_path) in fields.items():
+        actual_value = nested(actual, actual_path)
+        estimate_value = nested(estimate, estimate_path)
+        item = {
+            "actual": actual_value,
+            "estimate": estimate_value,
+            "matches": actual_value == estimate_value,
+        }
+        if isinstance(actual_value, (int, float)) and isinstance(
+            estimate_value, (int, float)
+        ):
+            difference = actual_value - estimate_value
+            item["difference"] = difference
+            item["relative_difference"] = (
+                difference / estimate_value if estimate_value else None
+            )
+        comparison[name] = item
+    return comparison
+
+
 def grid_metrics(grid_thw: Any, merge_size: int) -> dict[str, Any]:
     """Calculate patch and post-merge visual-token counts from image_grid_thw."""
     if hasattr(grid_thw, "tolist"):
