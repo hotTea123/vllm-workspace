@@ -102,6 +102,7 @@ def collect(args: argparse.Namespace) -> dict[str, Any]:
     )
 
     record = {
+        "source": "collect_scale_estimate",
         "model": args.model,
         "prompt": args.prompt,
         **image_metrics,

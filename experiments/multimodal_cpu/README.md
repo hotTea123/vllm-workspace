@@ -8,7 +8,7 @@ implement CPU offload.
 
 | Branch | Question answered |
 | --- | --- |
-| `exp/mm-common-base` | What shape and byte volume does each request create? |
+| `exp/mm-common-base` | Shared collection code and tests; not a runnable experiment. |
 | `exp/mm-npu-baseline` | Where does single-request NPU latency go? |
 | `exp/mm-vit-layer-profile` | Which ViT stages and operators dominate? |
 | `exp/mm-cpu-roofline` | What is the CPU execution lower bound? |
@@ -16,17 +16,23 @@ implement CPU offload.
 | `exp/mm-memory-kv` | How much NPU memory and KV capacity can offload recover? |
 | `exp/mm-concurrency` | How do batching, queueing, and tail latency change? |
 
-All experiment branches start from `exp/mm-common-base`. The unmodified fields
-below are therefore present in every branch:
+The other six branches are runnable experiments. They start from
+`exp/mm-common-base` and preserve these common fields:
 
 - source image dimensions, format, and bytes;
 - file read, media decode, and RGB conversion time;
 - processed dimensions and `image_grid_thw`;
 - patch count and post-merge visual-token count;
 - pixel tensor shape, dtype, and bytes;
-- estimated encoder-output tensor shape and bytes.
+- actual ViT input tensor shape, dtype, device, and bytes;
+- actual encoder-output tensor shape, dtype, device, and bytes.
 
-## Common input-scale probe
+Runtime `input_scale`, captured at the real vLLM encoder boundary, is the source
+of truth. `input_scale_estimate` is an independent processor estimate used only
+for comparison. `input_scale_comparison` records differences and never fails an
+experiment merely because the estimate differs.
+
+## Auxiliary input-scale estimate
 
 Run from the workspace root inside the target container, with the local `vllm`
 source installed in that container:
@@ -39,8 +45,10 @@ python -m experiments.multimodal_cpu.collect_input_scale \
 ```
 
 The command writes one JSONL file for programmatic analysis and one UTF-8 CSV
-file for spreadsheet inspection. Use the same `min_pixels` and `max_pixels` as
-the vLLM run when those processor overrides are configured.
+file for spreadsheet inspection. It does not execute a real vLLM inference and
+must not be used as the authoritative Roofline or transfer input. The NPU
+baseline records runtime values, this estimate, and their differences together.
+Use the same `min_pixels` and `max_pixels` as the vLLM run.
 
 ## Measurement rules
 
@@ -54,6 +62,8 @@ the vLLM run when those processor overrides are configured.
    embedding integration, language-model prefill, and first-token work.
 5. Run hardware measurements on the target Kunpeng/Ascend host. Source-only
    checks on Windows do not constitute performance results.
+6. Preserve estimate/runtime differences and continue the experiment; use only
+   runtime values in subsequent modeling.
 
 ## CPU roofline probe
 
