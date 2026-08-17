@@ -771,7 +771,7 @@ class Worker(WorkerBase):
         return self.model_runner.get_encoder_timing_stats()
 
     def get_encoder_batch_timing_stats(self) -> list[dict[str, Any]]:
-        """Get encoder batch timing stats from model runner."""
+        """Get encoder batch timing and tensor metadata from model runner."""
         return self.model_runner.get_encoder_batch_timing_stats()
 
     def annotate_profile(self, scheduler_output):

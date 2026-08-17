@@ -975,7 +975,7 @@ class NPUWorker(WorkerBase):
         return self.model_runner.get_encoder_timing_stats()
 
     def get_encoder_batch_timing_stats(self) -> list[dict[str, Any]]:
-        """Get encoder batch timing stats from the inherited model runner."""
+        """Get encoder batch timing and tensor metadata."""
         return self.model_runner.get_encoder_batch_timing_stats()
 
     def execute_dummy_batch(self) -> None:

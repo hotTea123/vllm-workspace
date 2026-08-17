@@ -7,7 +7,7 @@
 
 | 分支 | 需要回答的问题 |
 | --- | --- |
-| `exp/mm-common-base` | 每个请求实际产生什么形状和多少字节的数据？ |
+| `exp/mm-common-base` | 共享采集代码和测试；不是需要单独运行的实验。 |
 | `exp/mm-npu-baseline` | 单请求在 NPU 上的时延花在哪里？ |
 | `exp/mm-vit-layer-profile` | 哪些 ViT 阶段和算子占用主要时间？ |
 | `exp/mm-cpu-roofline` | CPU 执行 ViT 的理论时间下界是多少？ |
@@ -15,16 +15,22 @@
 | `exp/mm-memory-kv` | 卸载可以释放多少 NPU 显存和 KV Cache 容量？ |
 | `exp/mm-concurrency` | 批处理、排队和尾时延如何随并发变化？ |
 
-所有实验分支都基于 `exp/mm-common-base`，因此每个分支都会保留以下公共字段：
+其余六个分支是需要实际运行的实验。它们都基于 `exp/mm-common-base`，并保留
+以下公共字段：
 
 - 原始图片尺寸、格式和文件字节数；
 - 文件读取、媒体解码和 RGB 转换时间；
 - 处理后的图片尺寸和 `image_grid_thw`；
 - Patch 数和合并后的 Visual Token 数；
 - Pixel Tensor 的形状、数据类型和字节数；
-- Encoder 输出 Tensor 的估算形状和字节数。
+- ViT 实际输入 Tensor 的形状、数据类型、设备和字节数；
+- Encoder 实际输出 Tensor 的形状、数据类型、设备和字节数。
 
-## 公共输入规模采集
+运行时 `input_scale` 是权威数据源。它由真实 vLLM Encoder 调用采集；
+`input_scale_estimate` 来自独立 Processor，仅用于辅助校验；
+`input_scale_comparison` 记录两者差异，不会因不一致终止实验。
+
+## 辅助输入规模估算
 
 在目标容器内从工作区根目录运行，并确保容器安装或加载的是当前本地
 `vllm` 源码：
@@ -37,8 +43,9 @@ python -m experiments.multimodal_cpu.collect_input_scale \
 ```
 
 命令会生成一个供程序分析的 JSONL 文件，以及一个便于在表格软件中查看的
-UTF-8 CSV 文件。如果 vLLM 实验配置了 `min_pixels` 和 `max_pixels`，这里必须
-使用相同的处理器参数。
+UTF-8 CSV 文件。它不会执行真实 vLLM 推理，因此不能作为 Roofline 或传输
+实验的权威输入。NPU 基线会在真实推理过程中同时生成实际值、估算值和差异。
+如果 vLLM 实验配置了 `min_pixels` 和 `max_pixels`，估算必须使用相同参数。
 
 ## 测量规则
 
@@ -50,6 +57,8 @@ UTF-8 CSV 文件。如果 vLLM 实验配置了 `min_pixels` 和 `max_pixels`，�
    融合、语言模型 Prefill 和首 Token 生成，不能把它直接标为纯 Prefill。
 5. 硬件性能必须在目标鲲鹏/昇腾主机上测量；Windows 上的源码检查不能作为
    性能结果。
+6. 输入规模估算与运行时实际值不一致时保留差异并继续实验，后续建模只使用
+   运行时实际值。
 
 ## 闭合批次并发扫描
 

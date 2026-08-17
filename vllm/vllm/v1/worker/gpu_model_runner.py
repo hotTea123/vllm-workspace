@@ -10,7 +10,7 @@ from collections import defaultdict
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from copy import copy, deepcopy
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from functools import reduce
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias, cast
 
@@ -3030,22 +3030,30 @@ class GPUModelRunner(
                 batch_outputs_lst = list[torch.Tensor]()
                 for video_idx in range(num_items):
                     video_mm_kwargs_item = mm_kwargs[current_item_idx + video_idx]
-                    with self.timed_encoder_operation(
-                        should_time, mm_lora_refs, current_item_idx + video_idx, 1
-                    ):
-                        _, _, micro_batch_mm_inputs = next(
-                            group_and_batch_mm_kwargs(
-                                [video_mm_kwargs_item],
-                                device=self.device,
-                                pin_memory=self.pin_memory,
-                            )
+                    _, _, micro_batch_mm_inputs = next(
+                        group_and_batch_mm_kwargs(
+                            [video_mm_kwargs_item],
+                            device=self.device,
+                            pin_memory=self.pin_memory,
                         )
+                    )
+                    with self.timed_encoder_operation(
+                        should_time,
+                        mm_lora_refs,
+                        current_item_idx + video_idx,
+                        1,
+                        modality,
+                        micro_batch_mm_inputs,
+                    ) as batch_stats:
 
                         micro_batch_outputs = model.embed_multimodal(
                             **micro_batch_mm_inputs
                         )
 
-                        batch_outputs_lst.extend(micro_batch_outputs)
+                    self._record_encoder_batch_outputs(
+                        batch_stats, micro_batch_outputs
+                    )
+                    batch_outputs_lst.extend(micro_batch_outputs)
 
                 batch_outputs = batch_outputs_lst
             else:
@@ -3058,8 +3066,13 @@ class GPUModelRunner(
                 # size is dynamic depending on the input multimodal items.
 
                 with self.timed_encoder_operation(
-                    should_time, mm_lora_refs, current_item_idx, num_items
-                ):
+                    should_time,
+                    mm_lora_refs,
+                    current_item_idx,
+                    num_items,
+                    modality,
+                    mm_kwargs_batch,
+                ) as batch_stats:
                     cudagraph_output = None
                     if (
                         self.encoder_cudagraph_manager is not None
@@ -3073,6 +3086,8 @@ class GPUModelRunner(
                         batch_outputs = cudagraph_output
                     else:
                         batch_outputs = model.embed_multimodal(**mm_kwargs_batch)
+
+                self._record_encoder_batch_outputs(batch_stats, batch_outputs)
 
             sanity_check_mm_encoder_outputs(batch_outputs, expected_num_items=num_items)
             encoder_outputs.extend(batch_outputs)
@@ -7502,14 +7517,26 @@ class GPUModelRunner(
             return stats
 
     def get_encoder_batch_timing_stats(self) -> list[dict[str, Any]]:
-        """Get synchronized encoder batch timing stats and clear the registry."""
+        """Get synchronized encoder batch timing and tensor metadata."""
         with self._encoder_timing_lock:
-            stats = [
-                stats_obj.to_dict()
-                for stats_obj in self.encoder_batch_timing_registry
-            ]
+            stats = [item.to_dict() for item in self.encoder_batch_timing_registry]
             self.encoder_batch_timing_registry.clear()
             return stats
+
+    def _record_encoder_batch_outputs(
+        self,
+        batch_stats: "EncoderBatchTimingStats | None",
+        outputs: MultiModalEmbeddings,
+    ) -> None:
+        if batch_stats is None:
+            return
+
+        output_tensors = [_tensor_metadata(output) for output in outputs]
+        with self._encoder_timing_lock:
+            batch_stats.output_tensors = output_tensors
+            batch_stats.output_tensor_bytes = sum(
+                int(item["tensor_bytes"]) for item in output_tensors
+            )
 
     @contextmanager
     def timed_encoder_operation(
@@ -7518,6 +7545,8 @@ class GPUModelRunner(
         group_lora_refs: list[tuple[str, Any]],
         current_item_idx: int,
         num_items: int,
+        modality: str,
+        encoder_inputs: BatchedTensorInputs,
     ):
         """
         Context manager to time encoder forward operations.
@@ -7529,38 +7558,47 @@ class GPUModelRunner(
             num_items: Number of items in this group
         """
         if not should_time:
-            yield
+            yield None
             return
 
         group_refs = group_lora_refs[current_item_idx : current_item_idx + num_items]
         group_request_ids = {req_id for req_id, _ in group_refs}
-        group_encoder_tokens = sum(
-            pos_info.get_num_embeds() for _, pos_info in group_refs
+        input_tensors = {
+            key: metadata
+            for key, value in encoder_inputs.items()
+            if (metadata := _nested_tensor_metadata(value)) is not None
+        }
+        grid_thw = _grid_thw_from_inputs(encoder_inputs)
+        batch_stats = EncoderBatchTimingStats(
+            batch_id=self._encoder_batch_counter,
+            modality=modality,
+            num_items=num_items,
+            num_requests=len(group_request_ids),
+            num_encoder_tokens=sum(
+                pos_info.get_num_embeds() for _, pos_info in group_refs
+            ),
+            request_ids=sorted(group_request_ids),
+            item_request_ids=[req_id for req_id, _ in group_refs],
+            input_tensors=input_tensors,
+            input_tensor_bytes=_metadata_tensor_bytes(input_tensors),
+            grid_thw=grid_thw,
         )
+        self._encoder_batch_counter += 1
 
         torch.accelerator.synchronize()
         start_time = time.perf_counter()
 
         try:
-            yield
+            yield batch_stats
         finally:
             torch.accelerator.synchronize()
             elapsed = time.perf_counter() - start_time
+            batch_stats.encoder_forward_secs = elapsed
 
             per_request_time = elapsed / max(len(group_request_ids), 1)
 
             with self._encoder_timing_lock:
-                self.encoder_batch_timing_registry.append(
-                    EncoderBatchTimingStats(
-                        batch_id=self._encoder_batch_counter,
-                        encoder_forward_secs=elapsed,
-                        num_items=num_items,
-                        num_requests=len(group_request_ids),
-                        num_encoder_tokens=group_encoder_tokens,
-                        request_ids=sorted(group_request_ids),
-                    )
-                )
-                self._encoder_batch_counter += 1
+                self.encoder_batch_timing_registry.append(batch_stats)
                 for req_id in group_request_ids:
                     if req_id not in self.encoder_timing_registry:
                         self.encoder_timing_registry[req_id] = EncoderTimingStats()
@@ -7587,23 +7625,86 @@ class EncoderTimingStats:
         }
 
 
+def _tensor_metadata(tensor: torch.Tensor) -> dict[str, Any]:
+    numel = int(tensor.numel())
+    element_size = int(tensor.element_size())
+    return {
+        "shape": [int(dim) for dim in tensor.shape],
+        "dtype": str(tensor.dtype),
+        "device": str(tensor.device),
+        "numel": numel,
+        "element_size_bytes": element_size,
+        "tensor_bytes": numel * element_size,
+    }
+
+
+def _nested_tensor_metadata(value: Any) -> Any:
+    if isinstance(value, torch.Tensor):
+        return _tensor_metadata(value)
+    if isinstance(value, (list, tuple)):
+        items = [
+            metadata
+            for item in value
+            if (metadata := _nested_tensor_metadata(item)) is not None
+        ]
+        return items or None
+    return None
+
+
+def _metadata_tensor_bytes(value: Any) -> int:
+    if isinstance(value, dict):
+        if "tensor_bytes" in value:
+            return int(value["tensor_bytes"])
+        return sum(_metadata_tensor_bytes(item) for item in value.values())
+    if isinstance(value, list):
+        return sum(_metadata_tensor_bytes(item) for item in value)
+    return 0
+
+
+def _grid_thw_from_inputs(inputs: BatchedTensorInputs) -> list[list[int]]:
+    for key, value in inputs.items():
+        if not key.endswith("_grid_thw") or not isinstance(value, torch.Tensor):
+            continue
+        if value.device.type != "cpu":
+            return []
+        grid = value.tolist()
+        if grid and isinstance(grid[0], int):
+            grid = [grid]
+        return [[int(dim) for dim in item] for item in grid]
+    return []
+
+
 @dataclass
 class EncoderBatchTimingStats:
-    """Timing and workload metadata for one grouped encoder invocation."""
+    """Timing and actual tensor metadata for one encoder invocation."""
 
     batch_id: int
-    encoder_forward_secs: float
+    modality: str
     num_items: int
     num_requests: int
     num_encoder_tokens: int
     request_ids: list[str]
+    item_request_ids: list[str]
+    input_tensors: dict[str, Any]
+    input_tensor_bytes: int
+    grid_thw: list[list[int]]
+    encoder_forward_secs: float = 0.0
+    output_tensors: list[dict[str, Any]] = field(default_factory=list)
+    output_tensor_bytes: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "batch_id": self.batch_id,
-            "encoder_forward_secs": self.encoder_forward_secs,
+            "modality": self.modality,
             "num_items": self.num_items,
             "num_requests": self.num_requests,
             "num_encoder_tokens": self.num_encoder_tokens,
             "request_ids": self.request_ids,
+            "item_request_ids": self.item_request_ids,
+            "input_tensors": self.input_tensors,
+            "input_tensor_bytes": self.input_tensor_bytes,
+            "grid_thw": self.grid_thw,
+            "encoder_forward_secs": self.encoder_forward_secs,
+            "output_tensors": self.output_tensors,
+            "output_tensor_bytes": self.output_tensor_bytes,
         }
