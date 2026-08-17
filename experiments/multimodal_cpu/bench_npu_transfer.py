@@ -45,6 +45,18 @@ def load_first_jsonl(path: str | Path) -> dict[str, Any]:
     raise ValueError(f"No rows found in {path}.")
 
 
+def authoritative_input_scale(record: dict[str, Any]) -> dict[str, Any]:
+    """Extract tensor metadata captured by the real vLLM runtime."""
+    scale = record.get("input_scale")
+    if not isinstance(scale, dict) or scale.get("source") != "vllm_runtime":
+        raise ValueError(
+            "--input-scale-jsonl must contain run_npu_baseline rows with "
+            "input_scale.source='vllm_runtime'; collect_input_scale output is "
+            "only an estimate."
+        )
+    return scale
+
+
 def percentile_90(samples: list[float]) -> float:
     index = max(0, math.ceil(0.9 * len(samples)) - 1)
     return sorted(samples)[index]
@@ -78,21 +90,32 @@ def build_cases(
     scale: dict[str, Any], hidden_size: int, model_dtype: str, sweep_mb: str
 ) -> list[dict[str, Any]]:
     pixel = scale["pixel_values"]
+    encoder_output = scale["encoder_output"]
+    if "shape" not in encoder_output:
+        raise ValueError(
+            "The baseline row must describe exactly one runtime encoder output "
+            "tensor. Run the single-image NPU baseline first."
+        )
     cases = [
         {
             "tensor_role": "pixel_input",
             "shape": pixel["shape"],
             "dtype": normalize_dtype_name(pixel["dtype"]),
+            "shape_source": "vllm_runtime",
         },
         {
             "tensor_role": "encoder_output",
-            "shape": scale["encoder_output_estimate"]["shape"],
-            "dtype": model_dtype,
+            "shape": encoder_output["shape"],
+            "dtype": normalize_dtype_name(encoder_output["dtype"]),
+            "shape_source": "vllm_runtime",
         },
         {
             "tensor_role": "vit_cut_activation",
             "shape": [int(scale["patch_count"]), hidden_size],
             "dtype": model_dtype,
+            "shape_source": (
+                "derived_from_runtime_patch_count_and_model_config"
+            ),
         },
     ]
     cases.extend(
@@ -166,8 +189,9 @@ def main() -> None:
     import torch_npu  # noqa: F401
     from transformers import AutoConfig
 
-    scale = load_first_jsonl(args.input_scale_jsonl)
-    model = args.model or scale["model"]
+    baseline_record = load_first_jsonl(args.input_scale_jsonl)
+    scale = authoritative_input_scale(baseline_record)
+    model = args.model or baseline_record["model"]
     config = AutoConfig.from_pretrained(
         model, trust_remote_code=args.trust_remote_code
     )
@@ -196,6 +220,12 @@ def main() -> None:
                     "device": args.device,
                     "device_name": device_name,
                     "input_scale": scale,
+                    "input_scale_estimate": baseline_record.get(
+                        "input_scale_estimate"
+                    ),
+                    "input_scale_comparison": baseline_record.get(
+                        "input_scale_comparison"
+                    ),
                     **result,
                 }
             )

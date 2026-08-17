@@ -68,7 +68,7 @@ UTF-8 CSV 文件。它不会执行真实 vLLM 推理，因此不能作为 Roofli
 
 ```bash
 python -m experiments.multimodal_cpu.bench_npu_transfer \
-  --input-scale-jsonl /results/qwen25vl_2k_input_scale.jsonl \
+  --input-scale-jsonl /results/qwen25vl_7b_2k.jsonl \
   --model /path/to/Qwen2.5-VL-7B-Instruct \
   --device npu:0 \
   --model-dtype bfloat16 \
@@ -78,3 +78,8 @@ python -m experiments.multimodal_cpu.bench_npu_transfer \
 默认使用 Pinned Memory，因为 vLLM 的异步传输会在可用时使用锁页主机内存。
 可以增加 `--pageable` 重复测试，以量化普通分页内存的额外代价。每个计时样本
 都会在拷贝前后进行同步，因此得到的是适用于保守理论模型的阻塞传输成本。
+
+`--input-scale-jsonl` 必须传入 NPU 基线结果。Pixel 输入和 Encoder 输出 Case
+使用真实 vLLM 推理记录的 shape 与 dtype。由于该分支没有真正实现 ViT 切分，
+切分点激活仍是理论值，其 shape 由运行时 patch 数和模型配置推导。每条输出记录
+都会保留估算值及其与实际值的差异，供后续审计。

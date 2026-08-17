@@ -74,7 +74,7 @@ to fit fixed overhead plus effective bandwidth.
 
 ```bash
 python -m experiments.multimodal_cpu.bench_npu_transfer \
-  --input-scale-jsonl /results/qwen25vl_2k_input_scale.jsonl \
+  --input-scale-jsonl /results/qwen25vl_7b_2k.jsonl \
   --model /path/to/Qwen2.5-VL-7B-Instruct \
   --device npu:0 \
   --model-dtype bfloat16 \
@@ -85,3 +85,9 @@ Pinned memory is the default because asynchronous vLLM transfers use pinned
 host buffers where available. Repeat with `--pageable` to quantify the penalty.
 Every timed sample synchronizes before and after the copy, so the result is a
 blocking transfer cost suitable for the conservative theoretical model.
+
+`--input-scale-jsonl` must be an NPU baseline result. Pixel input and encoder
+output cases use the shape and dtype captured by the real vLLM run. The ViT cut
+activation remains theoretical because this branch does not implement a real
+cut: its shape is derived from the runtime patch count and model configuration.
+Estimate/runtime differences are retained in every output row for audit.
