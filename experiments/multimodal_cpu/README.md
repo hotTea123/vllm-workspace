@@ -86,8 +86,14 @@ The raw rows contain `preprocessor_total_ms`, individual processor stages,
 time. `encoder_forward_ms` is the synchronized whole encoder path; use the ViT
 layer-profile branch for a pure stage/operator breakdown.
 
-The branch also delegates the upstream encoder timing RPC through Ascend's
-`NPUWorker`; it does not add a second timer to the hot path.
+Each measured request also records `input_scale`, `input_scale_estimate`, and
+`input_scale_comparison`. `input_scale` comes from the real vLLM encoder call
+and contains the actual grid, device input tensors, and encoder output tensors.
+Roofline and transfer experiments must consume this field. Estimate/runtime
+differences are recorded without failing the experiment.
+
+The branch delegates encoder timing and batch-metadata RPCs through Ascend's
+`NPUWorker`; it does not add a second device synchronization to the hot path.
 
 For full process-tree CPU and NPU utilization, run the experiment under the
 host's `pidstat`/`perf` and `npu-smi` collectors. Parent-process CPU time alone is

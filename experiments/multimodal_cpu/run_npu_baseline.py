@@ -11,8 +11,13 @@ from typing import Any
 
 from experiments.multimodal_cpu.collect_input_scale import collect as collect_scale
 from experiments.multimodal_cpu.common import (
+    collect_encoder_batch_stats,
+    compare_input_scales,
     load_image_with_metrics,
+    merge_request_stage_stats,
+    normalize_internal_request_id,
     request_output_metrics,
+    runtime_input_scale_from_batch,
     write_csv,
     write_jsonl,
 )
@@ -66,12 +71,11 @@ def _stage_stats_for_output(llm: Any, request_id: str) -> dict[str, Any]:
     from vllm.benchmarks.mm_processor import get_timing_stats_from_engine
 
     all_stats = get_timing_stats_from_engine(llm.llm_engine)
-    stats = all_stats.get(request_id)
-    if stats is None and len(all_stats) == 1:
-        stats = next(iter(all_stats.values()))
-    if stats is None:
+    stats = merge_request_stage_stats(all_stats, [request_id])[request_id]
+    if not stats:
         raise RuntimeError(
-            f"No multimodal timing stats found for request {request_id}."
+            "No multimodal timing stats found for request "
+            f"{request_id}; available IDs: {list(all_stats)}."
         )
 
     converted: dict[str, Any] = {}
@@ -81,6 +85,34 @@ def _stage_stats_for_output(llm: Any, request_id: str) -> dict[str, Any]:
         else:
             converted[key] = value
     return converted
+
+
+def _runtime_batch_for_output(
+    batch_stats: list[dict[str, Any]], request_id: str
+) -> dict[str, Any]:
+    matches = [
+        batch
+        for batch in batch_stats
+        if request_id
+        in {
+            normalize_internal_request_id(internal_id)
+            for internal_id in batch["request_ids"]
+        }
+    ]
+    if not matches:
+        raise RuntimeError(
+            f"No runtime encoder batch found for request {request_id}."
+        )
+    first_rank = min(int(batch["worker_rank"]) for batch in matches)
+    first_rank_matches = [
+        batch for batch in matches if int(batch["worker_rank"]) == first_rank
+    ]
+    if len(first_rank_matches) != 1:
+        raise RuntimeError(
+            "Expected one encoder batch for the single-image request, got "
+            f"{len(first_rank_matches)} on worker rank {first_rank}."
+        )
+    return first_rank_matches[0]
 
 
 def _reset_request_caches(llm: Any) -> None:
@@ -100,7 +132,7 @@ def run(args: argparse.Namespace) -> list[dict[str, Any]]:
         }.items()
         if value is not None
     }
-    scale = collect_scale(
+    scale_estimate = collect_scale(
         SimpleNamespace(
             model=args.model,
             image=args.image,
@@ -130,6 +162,9 @@ def run(args: argparse.Namespace) -> list[dict[str, Any]]:
         ignore_eos=True,
     )
     prompt = qwen_prompt(args.prompt)
+    vision_config = llm.llm_engine.vllm_config.model_config.hf_config.vision_config
+    patch_size = int(vision_config.patch_size)
+    spatial_merge_size = int(vision_config.spatial_merge_size)
 
     for warmup_index in range(args.warmups):
         _reset_request_caches(llm)
@@ -150,6 +185,7 @@ def run(args: argparse.Namespace) -> list[dict[str, Any]]:
     from vllm.benchmarks.mm_processor import get_timing_stats_from_engine
 
     get_timing_stats_from_engine(llm.llm_engine)
+    collect_encoder_batch_stats(llm)
 
     records: list[dict[str, Any]] = []
     for repeat in range(args.repeats):
@@ -176,6 +212,16 @@ def run(args: argparse.Namespace) -> list[dict[str, Any]]:
             )
 
         stage_metrics = _stage_stats_for_output(llm, output.request_id)
+        encoder_batches = collect_encoder_batch_stats(llm)
+        runtime_batch = _runtime_batch_for_output(
+            encoder_batches, output.request_id
+        )
+        input_scale = runtime_input_scale_from_batch(
+            runtime_batch, patch_size, spatial_merge_size
+        )
+        input_scale_comparison = compare_input_scales(
+            input_scale, scale_estimate
+        )
         if stage_metrics.get("num_encoder_calls") != 1:
             raise RuntimeError(
                 "Encoder cache isolation failed: expected one encoder call, got "
@@ -191,7 +237,10 @@ def run(args: argparse.Namespace) -> list[dict[str, Any]]:
                 "expected_output_tokens": args.output_tokens,
                 "wall_e2e_ms": wall_ms,
                 "media": media_metrics,
-                "input_scale": scale,
+                "input_scale": input_scale,
+                "input_scale_estimate": scale_estimate,
+                "input_scale_comparison": input_scale_comparison,
+                "encoder_batches": encoder_batches,
                 "request": output_metrics,
                 "stages": stage_metrics,
             }

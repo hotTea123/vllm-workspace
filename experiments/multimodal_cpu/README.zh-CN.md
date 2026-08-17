@@ -80,8 +80,13 @@ python -m experiments.multimodal_cpu.run_npu_baseline \
 Wall Time。`encoder_forward_ms` 是同步后的完整 Encoder 路径时间；纯 ViT
 阶段和算子拆解应使用 ViT 层级分析分支。
 
-该分支还通过昇腾 `NPUWorker` 委托调用上游已有的 Encoder 计时 RPC，未在
-推理热路径中增加第二套计时器。
+每条正式请求还会记录 `input_scale`、`input_scale_estimate` 和
+`input_scale_comparison`。其中 `input_scale` 来自真实 vLLM Encoder 调用，
+包含实际 Grid、设备输入 Tensor 和 Encoder 输出 Tensor；后续 Roofline 和
+传输实验必须使用该字段。估算与实际值不一致时只记录差异，不终止实验。
+
+该分支还通过昇腾 `NPUWorker` 委托调用 Encoder 计时和 Batch 元数据 RPC，
+未在推理热路径中增加第二次设备同步。
 
 如需采集完整进程树的 CPU 和 NPU 利用率，应在主机侧同时运行 `pidstat`/
 `perf` 和 `npu-smi`。vLLM Worker 可能运行在独立进程中，因此仅统计父进程
