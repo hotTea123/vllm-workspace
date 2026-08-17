@@ -22,7 +22,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--input-scale-jsonl",
         required=True,
-        help="JSONL produced by collect_input_scale.",
+        help="JSONL produced by run_npu_baseline.",
     )
     parser.add_argument(
         "--model",
@@ -59,6 +59,18 @@ def load_first_jsonl(path: str | Path) -> dict[str, Any]:
             if line.strip():
                 return json.loads(line)
     raise ValueError(f"No rows found in {path}.")
+
+
+def authoritative_input_scale(record: dict[str, Any]) -> dict[str, Any]:
+    """Extract the real vLLM runtime scale from a baseline row."""
+    scale = record.get("input_scale")
+    if not isinstance(scale, dict) or scale.get("source") != "vllm_runtime":
+        raise ValueError(
+            "--input-scale-jsonl must contain run_npu_baseline rows with "
+            "input_scale.source='vllm_runtime'; collect_input_scale output is "
+            "only an estimate."
+        )
+    return scale
 
 
 def measure(
@@ -160,8 +172,9 @@ def main() -> None:
     import torch
     from transformers import AutoConfig
 
-    scale = load_first_jsonl(args.input_scale_jsonl)
-    model = args.model or scale["model"]
+    baseline_record = load_first_jsonl(args.input_scale_jsonl)
+    scale = authoritative_input_scale(baseline_record)
+    model = args.model or baseline_record["model"]
     config = AutoConfig.from_pretrained(
         model, trust_remote_code=args.trust_remote_code
     )
@@ -210,6 +223,12 @@ def main() -> None:
             "intermediate_size": intermediate_size,
             "environment": environment,
             "input_scale": scale,
+            "input_scale_estimate": baseline_record.get(
+                "input_scale_estimate"
+            ),
+            "input_scale_comparison": baseline_record.get(
+                "input_scale_comparison"
+            ),
         }
         records.append(
             {

@@ -70,7 +70,7 @@ UTF-8 CSV 文件。它不会执行真实 vLLM 推理，因此不能作为 Roofli
 ```bash
 numactl --cpunodebind=0 --membind=0 \
   python -m experiments.multimodal_cpu.bench_cpu_roofline \
-  --input-scale-jsonl /results/qwen25vl_2k_input_scale.jsonl \
+  --input-scale-jsonl /results/qwen25vl_7b_2k.jsonl \
   --model /path/to/Qwen2.5-VL-7B-Instruct \
   --dtype bfloat16 \
   --threads 1,8,16,32,64 \
@@ -83,3 +83,7 @@ Qwen2.5-VL 的 Transformer Block 位于 Patch Merger 之前。可在命令外层
 `perf stat`，检查周期数、指令数、Cache Miss 和可用的 Arm 向量事件。
 Roofline 结果即使很快，也只代表理论下界，不能证明完整 CPU ViT 能达到相同
 时延。
+
+`--input-scale-jsonl` 必须传入 NPU 基线结果。GEMM 和 Activation Case 使用
+其中的运行时 `input_scale`；估算值和差异只随记录保留以便审计。脚本会拒绝
+把独立 `collect_input_scale` 的估算结果当成权威输入。

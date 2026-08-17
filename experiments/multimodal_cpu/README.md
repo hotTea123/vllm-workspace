@@ -75,7 +75,7 @@ and SVE support that a future offload implementation would actually use.
 ```bash
 numactl --cpunodebind=0 --membind=0 \
   python -m experiments.multimodal_cpu.bench_cpu_roofline \
-  --input-scale-jsonl /results/qwen25vl_2k_input_scale.jsonl \
+  --input-scale-jsonl /results/qwen25vl_7b_2k.jsonl \
   --model /path/to/Qwen2.5-VL-7B-Instruct \
   --dtype bfloat16 \
   --threads 1,8,16,32,64 \
@@ -89,3 +89,7 @@ blocks run before the patch merger. Run `perf stat` around this command to verif
 cycles, instructions, cache misses, and available Arm vector events. A fast
 roofline result is only a lower bound; it is not evidence that a complete CPU
 ViT will reach the same latency.
+
+`--input-scale-jsonl` must be an NPU baseline result. The GEMM and activation
+cases use its runtime `input_scale`; the estimate and comparison are copied only
+for audit. A standalone `collect_input_scale` result is intentionally rejected.
