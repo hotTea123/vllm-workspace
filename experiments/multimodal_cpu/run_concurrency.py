@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import math
 import statistics
@@ -13,8 +14,13 @@ from typing import Any
 
 from experiments.multimodal_cpu.collect_input_scale import collect as collect_scale
 from experiments.multimodal_cpu.common import (
+    collect_encoder_batch_stats,
+    compare_input_scales,
     load_image_with_metrics,
+    merge_request_stage_stats,
+    normalize_internal_request_id,
     request_output_metrics,
+    runtime_input_scale_from_batch,
     write_csv,
     write_jsonl,
 )
@@ -72,27 +78,30 @@ def percentile(values: list[float], fraction: float) -> float:
 
 
 def aggregate_worker_batch_stats(
-    worker_stats: list[list[dict[str, Any]]],
+    worker_stats: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Merge identical TP-rank batches using the slowest synchronized rank."""
+    """Merge TP-rank batches while retaining every rank's runtime metadata."""
     batches: dict[tuple[int, tuple[str, ...]], dict[str, Any]] = {}
-    for rank, rank_stats in enumerate(worker_stats):
-        for item in rank_stats:
-            request_ids = tuple(item["request_ids"])
-            key = (int(item["batch_id"]), request_ids)
-            if key not in batches:
-                batches[key] = {
-                    **item,
-                    "encoder_forward_ms": item["encoder_forward_secs"] * 1000,
-                    "worker_ranks": [rank],
-                }
-                continue
-            batch = batches[key]
-            batch["encoder_forward_ms"] = max(
-                batch["encoder_forward_ms"],
-                item["encoder_forward_secs"] * 1000,
-            )
-            batch["worker_ranks"].append(rank)
+    for item in worker_stats:
+        rank = int(item["worker_rank"])
+        request_ids = tuple(item["request_ids"])
+        key = (int(item["batch_id"]), request_ids)
+        if key not in batches:
+            batches[key] = {
+                **item,
+                "representative_worker_rank": rank,
+                "encoder_forward_ms": item["encoder_forward_secs"] * 1000,
+                "worker_ranks": [rank],
+                "rank_records": [dict(item)],
+            }
+            continue
+        batch = batches[key]
+        batch["encoder_forward_ms"] = max(
+            batch["encoder_forward_ms"],
+            item["encoder_forward_secs"] * 1000,
+        )
+        batch["worker_ranks"].append(rank)
+        batch["rank_records"].append(dict(item))
 
     for batch in batches.values():
         batch.pop("encoder_forward_secs", None)
@@ -100,10 +109,171 @@ def aggregate_worker_batch_stats(
 
 
 def collect_batch_stats(llm: Any) -> list[dict[str, Any]]:
-    worker_stats = llm.llm_engine.collective_rpc(
-        "get_encoder_batch_timing_stats"
+    return aggregate_worker_batch_stats(collect_encoder_batch_stats(llm))
+
+
+def _metadata_for_shape(
+    metadata: dict[str, Any], shape: list[int]
+) -> dict[str, Any]:
+    result = dict(metadata)
+    numel = math.prod(shape)
+    result.update(
+        {
+            "shape": shape,
+            "numel": numel,
+            "tensor_bytes": numel * int(metadata["element_size_bytes"]),
+        }
     )
-    return aggregate_worker_batch_stats(worker_stats)
+    return result
+
+
+def runtime_item_input_scale(
+    batch: dict[str, Any],
+    item_index: int,
+    patch_size: int,
+    spatial_merge_size: int,
+) -> dict[str, Any]:
+    """Slice one request item's scale from an actual runtime encoder batch."""
+    grid = batch["grid_thw"]
+    if item_index >= len(grid) or item_index >= len(batch["output_tensors"]):
+        raise RuntimeError("Runtime encoder item metadata is incomplete.")
+
+    item_grid = [int(dim) for dim in grid[item_index]]
+    temporal, height, width = item_grid
+    patch_count = temporal * height * width
+    input_tensors = batch["input_tensors"]
+    pixel_key = (
+        "pixel_values"
+        if "pixel_values" in input_tensors
+        else "pixel_values_videos"
+    )
+    pixel_batch = input_tensors.get(pixel_key)
+    if not isinstance(pixel_batch, dict) or not pixel_batch.get("shape"):
+        raise RuntimeError("No runtime Pixel Tensor metadata found for the item.")
+    total_patch_count = sum(math.prod(item) for item in grid)
+    if int(pixel_batch["shape"][0]) != total_patch_count:
+        raise RuntimeError(
+            "Qwen-VL Pixel Tensor leading dimension does not match grid_thw."
+        )
+    pixel_item = _metadata_for_shape(
+        pixel_batch, [patch_count, *pixel_batch["shape"][1:]]
+    )
+    output_item = dict(batch["output_tensors"][item_index])
+    visual_token_count = int(output_item["shape"][0])
+    processed_width = width * patch_size
+    processed_height = height * patch_size
+    return {
+        "source": "vllm_runtime",
+        "scope": "encoder_batch_item",
+        "runtime_derivation": "sliced_from_encoder_batch_metadata",
+        "worker_rank": int(batch["representative_worker_rank"]),
+        "encoder_batch_id": int(batch["batch_id"]),
+        "encoder_batch_item_index": item_index,
+        "modality": batch.get("modality"),
+        "num_items": 1,
+        "grid_thw": [item_grid],
+        "patch_size": patch_size,
+        "patch_count": patch_count,
+        "spatial_merge_size": spatial_merge_size,
+        "visual_token_count": visual_token_count,
+        "processed_width": processed_width,
+        "processed_height": processed_height,
+        "processed_items": [
+            {
+                "processed_width": processed_width,
+                "processed_height": processed_height,
+            }
+        ],
+        "pixel_values": pixel_item,
+        "encoder_input_tensors": {pixel_key: pixel_item},
+        "encoder_input_tensor_bytes": pixel_item["tensor_bytes"],
+        "encoder_input_tensor_scope": "pixel_tensor_only",
+        "encoder_output": {
+            "items": [output_item],
+            **output_item,
+        },
+    }
+
+
+def request_runtime_scales(
+    batches: list[dict[str, Any]],
+    request_ids: list[str],
+    patch_size: int,
+    spatial_merge_size: int,
+) -> dict[str, dict[str, Any]]:
+    matches: dict[str, list[dict[str, Any]]] = {
+        request_id: [] for request_id in request_ids
+    }
+    for batch in batches:
+        for item_index, internal_id in enumerate(batch["item_request_ids"]):
+            request_id = normalize_internal_request_id(internal_id)
+            if request_id in matches:
+                matches[request_id].append(
+                    runtime_item_input_scale(
+                        batch,
+                        item_index,
+                        patch_size,
+                        spatial_merge_size,
+                    )
+                )
+
+    result: dict[str, dict[str, Any]] = {}
+    for request_id, scales in matches.items():
+        if len(scales) != 1:
+            raise RuntimeError(
+                "Expected one runtime encoder item for request "
+                f"{request_id}, got {len(scales)}."
+            )
+        result[request_id] = scales[0]
+    return result
+
+
+def batch_scale_estimate(
+    item_estimate: dict[str, Any], num_items: int
+) -> dict[str, Any]:
+    """Scale the auxiliary one-image estimate to a closed encoder batch."""
+    estimate = copy.deepcopy(item_estimate)
+    estimate["source"] = "collect_scale_estimate_batch"
+    estimate["scope"] = "encoder_batch"
+    estimate["num_items"] = num_items
+    estimate["grid_thw"] = estimate["grid_thw"] * num_items
+    estimate["patch_count"] *= num_items
+    estimate["visual_token_count"] *= num_items
+    for key in ("pixel_values", "encoder_output_estimate"):
+        metadata = estimate[key]
+        metadata["shape"][0] *= num_items
+        if "numel" in metadata:
+            metadata["numel"] *= num_items
+        metadata["tensor_bytes"] *= num_items
+    if num_items > 1:
+        estimate.pop("processed_width", None)
+        estimate.pop("processed_height", None)
+    return estimate
+
+
+def runtime_batch_input_scale(
+    batch: dict[str, Any], patch_size: int, spatial_merge_size: int
+) -> dict[str, Any]:
+    """Build actual batch scale and a logical combined output shape."""
+    scale = runtime_input_scale_from_batch(
+        batch, patch_size, spatial_merge_size
+    )
+    scale["scope"] = "encoder_batch"
+    outputs = scale["encoder_output"]["items"]
+    if outputs and all(
+        item["shape"][1:] == outputs[0]["shape"][1:] for item in outputs
+    ):
+        scale["encoder_output"].update(
+            {
+                "shape": [
+                    sum(int(item["shape"][0]) for item in outputs),
+                    *outputs[0]["shape"][1:],
+                ],
+                "dtype": outputs[0]["dtype"],
+                "shape_source": "combined_from_runtime_items",
+            }
+        )
+    return scale
 
 
 def summarize_requests(requests: list[dict[str, Any]]) -> dict[str, float]:
@@ -144,7 +314,7 @@ def main() -> None:
         }.items()
         if value is not None
     }
-    scale = collect_scale(
+    scale_estimate = collect_scale(
         SimpleNamespace(
             model=args.model,
             image=args.image,
@@ -177,6 +347,9 @@ def main() -> None:
         ignore_eos=True,
     )
     prompt = qwen_prompt(args.prompt)
+    vision_config = llm.llm_engine.vllm_config.model_config.hf_config.vision_config
+    patch_size = int(vision_config.patch_size)
+    spatial_merge_size = int(vision_config.spatial_merge_size)
 
     for warmup in range(args.warmups):
         llm.reset_mm_cache()
@@ -219,9 +392,19 @@ def main() -> None:
                 requests, sampling_params, use_tqdm=False
             )
             wall_s = time.perf_counter() - wall_start
-            stage_stats = get_timing_stats_from_engine(llm.llm_engine)
+            all_stage_stats = get_timing_stats_from_engine(llm.llm_engine)
             batch_stats = collect_batch_stats(llm)
             request_metrics = [request_output_metrics(output) for output in outputs]
+            request_ids = [item["request_id"] for item in request_metrics]
+            stage_stats = merge_request_stage_stats(
+                all_stage_stats, request_ids
+            )
+            runtime_scales = request_runtime_scales(
+                batch_stats,
+                request_ids,
+                patch_size,
+                spatial_merge_size,
+            )
 
             for metrics in request_metrics:
                 if metrics["output_token_count"] != args.output_tokens:
@@ -232,6 +415,7 @@ def main() -> None:
                         "Encoder cache isolation failed for request "
                         f"{metrics['request_id']}."
                     )
+                input_scale = runtime_scales[metrics["request_id"]]
                 records.append(
                     {
                         "record_type": "request",
@@ -240,7 +424,11 @@ def main() -> None:
                         "concurrency": concurrency,
                         "repeat": repeat,
                         "media": media_metrics,
-                        "input_scale": scale,
+                        "input_scale": input_scale,
+                        "input_scale_estimate": scale_estimate,
+                        "input_scale_comparison": compare_input_scales(
+                            input_scale, scale_estimate
+                        ),
                         "request": metrics,
                         "stages": timing_stats_ms(stats),
                     }
@@ -261,21 +449,28 @@ def main() -> None:
                     **summarize_requests(request_metrics),
                 }
             )
-            records.extend(
-                {
-                    "record_type": "encoder_batch",
-                    "experiment": "concurrency",
-                    "model": args.model,
-                    "concurrency": concurrency,
-                    "repeat": repeat,
-                    "input_patch_count_per_request": scale["patch_count"],
-                    "batch_patch_count_estimate": (
-                        scale["patch_count"] * batch["num_items"]
-                    ),
-                    **batch,
-                }
-                for batch in batch_stats
-            )
+            for batch in batch_stats:
+                input_scale = runtime_batch_input_scale(
+                    batch, patch_size, spatial_merge_size
+                )
+                input_scale_estimate = batch_scale_estimate(
+                    scale_estimate, int(batch["num_items"])
+                )
+                records.append(
+                    {
+                        "record_type": "encoder_batch",
+                        "experiment": "concurrency",
+                        "model": args.model,
+                        "concurrency": concurrency,
+                        "repeat": repeat,
+                        "input_scale": input_scale,
+                        "input_scale_estimate": input_scale_estimate,
+                        "input_scale_comparison": compare_input_scales(
+                            input_scale, input_scale_estimate
+                        ),
+                        **batch,
+                    }
+                )
 
     prefix = Path(args.output_prefix)
     write_jsonl(prefix.with_suffix(".jsonl"), records)

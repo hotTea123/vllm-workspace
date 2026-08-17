@@ -63,8 +63,10 @@ UTF-8 CSV 文件。它不会执行真实 vLLM 推理，因此不能作为 Roofli
 ## 闭合批次并发扫描
 
 该分支为每次分组后的 Encoder 调用增加一条结构化记录，包括批次 ID、请求
-ID、媒体项数量、合并后的 Encoder Token 数和同步批次时间。同时为昇腾
-Worker 补充对上游已有逐请求 Encoder 计时注册表的委托接口。
+ID、媒体项数量、合并后的 Encoder Token 数、同步批次时间，以及每个 TP Rank
+上的实际输入/输出 Tensor 元数据。逐请求记录中的输入规模由对应运行时批次按
+媒体项切出。`collect_scale` 只作为辅助估算；请求行和批次行都会记录估算与实际
+值的差异，差异不会导致实验失败。
 
 ```bash
 python -m experiments.multimodal_cpu.run_concurrency \
@@ -80,3 +82,8 @@ python -m experiments.multimodal_cpu.run_concurrency \
 在线负载应另行使用 `vllm bench serve` 测试；本分支得到的批处理服务曲线
 用于卸载理论模型。实验期间应同时运行 `pidstat`/`perf` 和 `npu-smi`，采集
 完整进程树的 CPU 与 NPU 利用率。
+
+批处理分析应以 `encoder_batch` 行为权威单位，其 `input_scale.scope` 为
+`encoder_batch`；请求行使用 `encoder_batch_item`，并记录来源批次和媒体项
+序号。每个 Rank 的原始元数据保留在 `rank_records` 中，批次时延采用同步后最慢
+Rank 的值。

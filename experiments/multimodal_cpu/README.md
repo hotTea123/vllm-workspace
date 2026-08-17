@@ -68,9 +68,11 @@ Use the same `min_pixels` and `max_pixels` as the vLLM run.
 ## Closed-batch concurrency sweep
 
 This branch adds one structured record per grouped encoder invocation: batch ID,
-request IDs, number of media items, post-merge encoder tokens, and synchronized
-batch time. It also adds the missing Ascend worker delegation for the existing
-per-request encoder timing registry.
+request IDs, number of media items, post-merge encoder tokens, synchronized
+batch time, and actual input/output tensor metadata from every TP rank. Request
+rows contain an item-scale view sliced from that runtime batch. `collect_scale`
+is retained only as an auxiliary estimate, and both request and batch rows record
+the estimate/runtime comparison without failing on a mismatch.
 
 ```bash
 python -m experiments.multimodal_cpu.run_concurrency \
@@ -87,3 +89,9 @@ model network arrival patterns. Use `vllm bench serve` separately for an open
 online load test, and retain this branch's batch service curve for the offload
 model. Run `pidstat`/`perf` and `npu-smi` alongside the sweep for process-tree CPU
 and NPU utilization.
+
+The authoritative unit for batching analysis is the `encoder_batch` row. Its
+`input_scale.scope` is `encoder_batch`; request rows use
+`encoder_batch_item` and identify the source batch and item index. Per-rank raw
+metadata remains in `rank_records`, while latency uses the slowest synchronized
+rank.
