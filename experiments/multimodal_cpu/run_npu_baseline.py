@@ -6,13 +6,10 @@ import argparse
 import json
 import time
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
-from experiments.multimodal_cpu.collect_input_scale import collect as collect_scale
 from experiments.multimodal_cpu.common import (
     collect_encoder_batch_stats,
-    compare_input_scales,
     load_image_with_metrics,
     merge_request_stage_stats,
     normalize_internal_request_id,
@@ -132,17 +129,6 @@ def run(args: argparse.Namespace) -> list[dict[str, Any]]:
         }.items()
         if value is not None
     }
-    scale_estimate = collect_scale(
-        SimpleNamespace(
-            model=args.model,
-            image=args.image,
-            prompt=args.prompt,
-            min_pixels=args.min_pixels,
-            max_pixels=args.max_pixels,
-            trust_remote_code=args.trust_remote_code,
-            model_dtype_bytes=2,
-        )
-    )
 
     llm = LLM(
         model=args.model,
@@ -153,6 +139,7 @@ def run(args: argparse.Namespace) -> list[dict[str, Any]]:
         mm_processor_cache_gb=0,
         enable_prefix_caching=False,
         enable_mm_processor_stats=True,
+        disable_log_stats=False,
         limit_mm_per_prompt={"image": 1},
     )
     sampling_params = SamplingParams(
@@ -205,6 +192,15 @@ def run(args: argparse.Namespace) -> list[dict[str, Any]]:
         wall_ms = (time.perf_counter() - wall_start) * 1000
         output = outputs[0]
         output_metrics = request_output_metrics(output)
+        missing_latency_metrics = {
+            "ttft_ms",
+            "tpot_ms",
+        } - output_metrics.keys()
+        if missing_latency_metrics:
+            raise RuntimeError(
+                "Request latency metrics are unavailable: "
+                f"{sorted(missing_latency_metrics)}."
+            )
         if output_metrics["output_token_count"] != args.output_tokens:
             raise RuntimeError(
                 "Output length isolation failed: expected "
@@ -218,9 +214,6 @@ def run(args: argparse.Namespace) -> list[dict[str, Any]]:
         )
         input_scale = runtime_input_scale_from_batch(
             runtime_batch, patch_size, spatial_merge_size
-        )
-        input_scale_comparison = compare_input_scales(
-            input_scale, scale_estimate
         )
         if stage_metrics.get("num_encoder_calls") != 1:
             raise RuntimeError(
@@ -238,8 +231,6 @@ def run(args: argparse.Namespace) -> list[dict[str, Any]]:
                 "wall_e2e_ms": wall_ms,
                 "media": media_metrics,
                 "input_scale": input_scale,
-                "input_scale_estimate": scale_estimate,
-                "input_scale_comparison": input_scale_comparison,
                 "encoder_batches": encoder_batches,
                 "request": output_metrics,
                 "stages": stage_metrics,

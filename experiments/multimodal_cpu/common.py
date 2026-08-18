@@ -44,20 +44,6 @@ def load_image_with_metrics(path: str | Path) -> tuple[Any, dict[str, Any]]:
     return rgb_image, metadata
 
 
-def tensor_metadata(tensor: Any) -> dict[str, Any]:
-    """Return shape, dtype, element count, and storage bytes for a tensor."""
-    shape = [int(dim) for dim in tensor.shape]
-    numel = int(tensor.numel())
-    element_size = int(tensor.element_size())
-    return {
-        "shape": shape,
-        "dtype": str(tensor.dtype),
-        "numel": numel,
-        "element_size_bytes": element_size,
-        "tensor_bytes": numel * element_size,
-    }
-
-
 def normalize_internal_request_id(request_id: str) -> str:
     """Strip the V1 engine's eight-character request-id suffix."""
     external_id, separator, suffix = request_id.rpartition("-")
@@ -158,95 +144,6 @@ def runtime_input_scale_from_batch(
     if len(processed_items) == 1:
         result.update(processed_items[0])
     return result
-
-
-def compare_input_scales(
-    actual: Mapping[str, Any], estimate: Mapping[str, Any]
-) -> dict[str, dict[str, Any]]:
-    """Return differences without treating an estimate mismatch as failure."""
-
-    def nested(source: Mapping[str, Any], path: tuple[str, ...]) -> Any:
-        value: Any = source
-        for key in path:
-            if not isinstance(value, Mapping) or key not in value:
-                return None
-            value = value[key]
-        return value
-
-    fields = {
-        "processed_width": (("processed_width",), ("processed_width",)),
-        "processed_height": (("processed_height",), ("processed_height",)),
-        "grid_thw": (("grid_thw",), ("grid_thw",)),
-        "patch_count": (("patch_count",), ("patch_count",)),
-        "visual_token_count": (
-            ("visual_token_count",),
-            ("visual_token_count",),
-        ),
-        "pixel_values.shape": (
-            ("pixel_values", "shape"),
-            ("pixel_values", "shape"),
-        ),
-        "pixel_values.dtype": (
-            ("pixel_values", "dtype"),
-            ("pixel_values", "dtype"),
-        ),
-        "pixel_values.tensor_bytes": (
-            ("pixel_values", "tensor_bytes"),
-            ("pixel_values", "tensor_bytes"),
-        ),
-        "encoder_output.shape": (
-            ("encoder_output", "shape"),
-            ("encoder_output_estimate", "shape"),
-        ),
-        "encoder_output.tensor_bytes": (
-            ("encoder_output", "tensor_bytes"),
-            ("encoder_output_estimate", "tensor_bytes"),
-        ),
-    }
-    comparison: dict[str, dict[str, Any]] = {}
-    for name, (actual_path, estimate_path) in fields.items():
-        actual_value = nested(actual, actual_path)
-        estimate_value = nested(estimate, estimate_path)
-        item = {
-            "actual": actual_value,
-            "estimate": estimate_value,
-            "matches": actual_value == estimate_value,
-        }
-        if isinstance(actual_value, (int, float)) and isinstance(
-            estimate_value, (int, float)
-        ):
-            difference = actual_value - estimate_value
-            item["difference"] = difference
-            item["relative_difference"] = (
-                difference / estimate_value if estimate_value else None
-            )
-        comparison[name] = item
-    return comparison
-
-
-def grid_metrics(grid_thw: Any, merge_size: int) -> dict[str, Any]:
-    """Calculate patch and post-merge visual-token counts from image_grid_thw."""
-    if hasattr(grid_thw, "tolist"):
-        grid = grid_thw.tolist()
-    else:
-        grid = grid_thw
-
-    if grid and isinstance(grid[0], int):
-        grid = [grid]
-    normalized = [[int(value) for value in item] for item in grid]
-    patch_count = sum(t * h * w for t, h, w in normalized)
-    merge_unit = merge_size**2
-    if patch_count % merge_unit:
-        raise ValueError(
-            f"Patch count {patch_count} is not divisible by merge unit "
-            f"{merge_unit}."
-        )
-    return {
-        "grid_thw": normalized,
-        "patch_count": patch_count,
-        "spatial_merge_size": merge_size,
-        "visual_token_count": patch_count // merge_unit,
-    }
 
 
 def request_output_metrics(output: Any) -> dict[str, Any]:

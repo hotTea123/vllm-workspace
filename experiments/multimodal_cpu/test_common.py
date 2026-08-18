@@ -6,9 +6,7 @@ import unittest
 from types import SimpleNamespace
 
 from experiments.multimodal_cpu.common import (
-    compare_input_scales,
     flatten_record,
-    grid_metrics,
     merge_request_stage_stats,
     normalize_internal_request_id,
     request_output_metrics,
@@ -17,17 +15,6 @@ from experiments.multimodal_cpu.common import (
 
 
 class CommonHelpersTest(unittest.TestCase):
-    def test_grid_metrics_uses_spatial_merge(self) -> None:
-        self.assertEqual(
-            grid_metrics([[1, 8, 12]], merge_size=2),
-            {
-                "grid_thw": [[1, 8, 12]],
-                "patch_count": 96,
-                "spatial_merge_size": 2,
-                "visual_token_count": 24,
-            },
-        )
-
     def test_request_output_metrics_calculates_tpot(self) -> None:
         output = SimpleNamespace(
             request_id="request-1",
@@ -76,7 +63,7 @@ class CommonHelpersTest(unittest.TestCase):
             },
         )
 
-    def test_runtime_input_scale_and_estimate_difference(self) -> None:
+    def test_runtime_input_scale_from_encoder_batch(self) -> None:
         batch = {
             "batch_id": 3,
             "worker_rank": 0,
@@ -101,41 +88,12 @@ class CommonHelpersTest(unittest.TestCase):
             ],
             "output_tensor_bytes": 28672,
         }
-        estimate = {
-            "processed_width": 56,
-            "processed_height": 56,
-            "grid_thw": [[1, 4, 4]],
-            "patch_count": 16,
-            "visual_token_count": 4,
-            "pixel_values": {
-                "shape": [16, 1176],
-                "dtype": "torch.float32",
-                "tensor_bytes": 75264,
-            },
-            "encoder_output_estimate": {
-                "shape": [4, 3584],
-                "tensor_bytes": 28000,
-            },
-        }
-
         actual = runtime_input_scale_from_batch(batch, 14, 2)
-        comparison = compare_input_scales(actual, estimate)
 
         self.assertEqual(actual["source"], "vllm_runtime")
         self.assertEqual(actual["patch_count"], 16)
         self.assertEqual(actual["processed_width"], 56)
         self.assertEqual(actual["encoder_output"]["shape"], [4, 3584])
-        self.assertTrue(comparison["grid_thw"]["matches"])
-        self.assertEqual(
-            comparison["encoder_output.tensor_bytes"],
-            {
-                "actual": 28672,
-                "estimate": 28000,
-                "matches": False,
-                "difference": 672,
-                "relative_difference": 0.024,
-            },
-        )
 
 
 if __name__ == "__main__":

@@ -28,27 +28,8 @@ The other six branches are runnable experiments. They start from
 - actual encoder-output tensor shape, dtype, device, and bytes.
 
 Runtime `input_scale`, captured at the real vLLM encoder boundary, is the source
-of truth. `input_scale_estimate` is an independent processor estimate used only
-for comparison. `input_scale_comparison` records differences and never fails an
-experiment merely because the estimate differs.
-
-## Auxiliary input-scale estimate
-
-Run from the workspace root inside the target container, with the local `vllm`
-source installed in that container:
-
-```bash
-python -m experiments.multimodal_cpu.collect_input_scale \
-  --model /path/to/Qwen2.5-VL-7B-Instruct \
-  --image /data/image.jpg \
-  --output-prefix /results/qwen25vl_7b_2k
-```
-
-The command writes one JSONL file for programmatic analysis and one UTF-8 CSV
-file for spreadsheet inspection. It does not execute a real vLLM inference and
-must not be used as the authoritative Roofline or transfer input. The NPU
-baseline records runtime values, this estimate, and their differences together.
-Use the same `min_pixels` and `max_pixels` as the vLLM run.
+of truth. The experiment does not calculate or record a separate processor
+estimate.
 
 ## Measurement rules
 
@@ -62,8 +43,7 @@ Use the same `min_pixels` and `max_pixels` as the vLLM run.
    embedding integration, language-model prefill, and first-token work.
 5. Run hardware measurements on the target Kunpeng/Ascend host. Source-only
    checks on Windows do not constitute performance results.
-6. Preserve estimate/runtime differences and continue the experiment; use only
-   runtime values in subsequent modeling.
+6. Use only values captured from real vLLM runtime calls in subsequent modeling.
 
 ## NPU single-request baseline
 
@@ -86,11 +66,12 @@ The raw rows contain `preprocessor_total_ms`, individual processor stages,
 time. `encoder_forward_ms` is the synchronized whole encoder path; use the ViT
 layer-profile branch for a pure stage/operator breakdown.
 
-Each measured request also records `input_scale`, `input_scale_estimate`, and
-`input_scale_comparison`. `input_scale` comes from the real vLLM encoder call
-and contains the actual grid, device input tensors, and encoder output tensors.
-Roofline and transfer experiments must consume this field. Estimate/runtime
-differences are recorded without failing the experiment.
+Each measured request records `input_scale` from the real vLLM encoder call. It
+contains the actual grid, device input tensors, and encoder output tensors, and
+is the only input-scale source for Roofline and transfer experiments.
+
+Request metrics are enabled explicitly. The experiment fails instead of writing
+an incomplete row if TTFT or TPOT is unavailable.
 
 The branch delegates encoder timing and batch-metadata RPCs through Ascend's
 `NPUWorker`; it does not add a second device synchronization to the hot path.

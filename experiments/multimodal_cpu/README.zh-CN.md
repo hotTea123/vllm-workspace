@@ -26,26 +26,8 @@
 - ViT 实际输入 Tensor 的形状、数据类型、设备和字节数；
 - Encoder 实际输出 Tensor 的形状、数据类型、设备和字节数。
 
-运行时 `input_scale` 是权威数据源。它由真实 vLLM Encoder 调用采集；
-`input_scale_estimate` 来自独立 Processor，仅用于辅助校验；
-`input_scale_comparison` 记录两者差异，不会因不一致终止实验。
-
-## 辅助输入规模估算
-
-在目标容器内从工作区根目录运行，并确保容器安装或加载的是当前本地
-`vllm` 源码：
-
-```bash
-python -m experiments.multimodal_cpu.collect_input_scale \
-  --model /path/to/Qwen2.5-VL-7B-Instruct \
-  --image /data/image.jpg \
-  --output-prefix /results/qwen25vl_7b_2k
-```
-
-命令会生成一个供程序分析的 JSONL 文件，以及一个便于在表格软件中查看的
-UTF-8 CSV 文件。它不会执行真实 vLLM 推理，因此不能作为 Roofline 或传输
-实验的权威输入。NPU 基线会在真实推理过程中同时生成实际值、估算值和差异。
-如果 vLLM 实验配置了 `min_pixels` 和 `max_pixels`，估算必须使用相同参数。
+运行时 `input_scale` 是权威数据源。它由真实 vLLM Encoder 调用采集；实验不再
+计算或记录独立 Processor 估算值。
 
 ## 测量规则
 
@@ -57,8 +39,7 @@ UTF-8 CSV 文件。它不会执行真实 vLLM 推理，因此不能作为 Roofli
    融合、语言模型 Prefill 和首 Token 生成，不能把它直接标为纯 Prefill。
 5. 硬件性能必须在目标鲲鹏/昇腾主机上测量；Windows 上的源码检查不能作为
    性能结果。
-6. 输入规模估算与运行时实际值不一致时保留差异并继续实验，后续建模只使用
-   运行时实际值。
+6. 后续建模只使用真实 vLLM 运行时调用采集的数据。
 
 ## NPU 单请求基线
 
@@ -80,10 +61,12 @@ python -m experiments.multimodal_cpu.run_npu_baseline \
 Wall Time。`encoder_forward_ms` 是同步后的完整 Encoder 路径时间；纯 ViT
 阶段和算子拆解应使用 ViT 层级分析分支。
 
-每条正式请求还会记录 `input_scale`、`input_scale_estimate` 和
-`input_scale_comparison`。其中 `input_scale` 来自真实 vLLM Encoder 调用，
-包含实际 Grid、设备输入 Tensor 和 Encoder 输出 Tensor；后续 Roofline 和
-传输实验必须使用该字段。估算与实际值不一致时只记录差异，不终止实验。
+每条正式请求都会记录来自真实 vLLM Encoder 调用的 `input_scale`，其中包含
+实际 Grid、设备输入 Tensor 和 Encoder 输出 Tensor。后续 Roofline 和传输
+实验只使用该字段作为输入规模数据源。
+
+请求时延统计会被显式启用；如果 TTFT 或 TPOT 不可用，实验会直接失败，不会
+写出指标不完整的记录。
 
 该分支还通过昇腾 `NPUWorker` 委托调用 Encoder 计时和 Batch 元数据 RPC，
 未在推理热路径中增加第二次设备同步。
