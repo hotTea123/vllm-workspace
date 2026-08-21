@@ -15,8 +15,9 @@ implement CPU offload.
 | `exp/mm-npu-transfer` | What does CPU/NPU transfer cost? |
 | `exp/mm-memory-kv` | How much NPU memory and KV capacity can offload recover? |
 | `exp/mm-concurrency` | How do batching, queueing, and tail latency change? |
+| `zkx/mm-online-cpu` | What CPU resources does the warmed online service consume? |
 
-The other six branches are runnable experiments. They start from
+The runnable experiment branches start from
 `exp/mm-common-base` and preserve these common fields:
 
 - source image dimensions, format, and bytes;
@@ -97,3 +98,73 @@ python -m unittest \
 For full process-tree CPU and NPU utilization, run the experiment under the
 host's `pidstat`/`perf` and `npu-smi` collectors. Parent-process CPU time alone is
 not representative because vLLM workers may be separate processes.
+
+## Warmed online CPU measurement
+
+The `zkx/mm-online-cpu` branch measures only host CPU resources, streaming TTFT,
+TPOT, and synchronized whole-encoder time. It does not repeat input-scale
+or tensor-size collection from the offline baseline.
+
+Start the server inside the inference container and save its log:
+
+```bash
+bash experiments/multimodal_cpu/start_online_cpu_server.sh \
+  --model /models/Qwen2.5-VL-72B-Instruct \
+  --tensor-parallel-size 8 \
+  --max-model-len 16635 \
+  --port 12346 \
+  -- --max-num-batched-tokens 16635 \
+  2>&1 | tee /results/online_cpu_server.log
+```
+
+The launcher always uses the following isolation settings:
+
+- `--mm-processor-cache-gb 0`;
+- `--no-enable-prefix-caching`;
+- `compile_mm_encoder=false`;
+- `cudagraph_mm_encoder=false`;
+- `--enable-mm-processor-stats` for synchronized encoder timing.
+
+It does not disable the request-local encoder cache because vLLM needs that
+storage to splice ViT outputs into language-model prefill. Instead, the client
+sends the exact same image with a unique media `uuid` in every request. vLLM
+uses that UUID as the encoder-cache key, so different requests cannot share the
+cached encoder output.
+
+After the server is ready, run the measurement on the Docker host:
+
+```bash
+bash experiments/multimodal_cpu/run_online_cpu_measurement.sh \
+  --container vllm-container \
+  --base-url http://127.0.0.1:12346 \
+  --model /models/Qwen2.5-VL-72B-Instruct \
+  --image /data/1-1024x576.jpg \
+  --warmups 4 \
+  --repeats 10 \
+  --output-tokens 100 \
+  --output-prefix /results/qwen72b_online_cpu
+```
+
+The orchestration script finishes all warmups before starting
+`collect_host_cpu.sh`, then stops CPU sampling immediately after the last
+measured response. It writes:
+
+- `/results/qwen72b_online_cpu.requests.jsonl` for TTFT, TPOT, request IDs,
+  media UUIDs, and millisecond window timestamps;
+- `/results/qwen72b_online_cpu.host_cpu.csv` for container CPU percentage,
+  effective CPU cores, memory usage, and PIDs.
+
+Generate the final cache-isolation and performance summary after making the
+server log available on the host:
+
+```bash
+python -m experiments.multimodal_cpu.analyze_online_cpu \
+  --requests /results/qwen72b_online_cpu.requests.jsonl \
+  --host-cpu /results/qwen72b_online_cpu.host_cpu.csv \
+  --server-log /results/online_cpu_server.log \
+  --output /results/qwen72b_online_cpu_report.md
+```
+
+The analyzer restricts CPU samples to the measured request timestamps, requires
+one encoder timing match for every measured response, and takes the maximum
+encoder time across tensor-parallel ranks for each request.

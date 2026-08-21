@@ -81,7 +81,7 @@ fi
 
 mkdir -p "$(dirname -- "$output")"
 printf '%s\n' \
-    'timestamp,container,cpu_percent,effective_cores,memory_usage,pids' \
+    'timestamp_epoch_ms,timestamp_iso,container,cpu_percent,effective_cores,memory_usage,pids' \
     > "$output"
 
 trap 'echo; echo "Stopped. Results: $output" >&2; exit 0' INT TERM
@@ -98,10 +98,12 @@ while true; do
     IFS='|' read -r cpu_percent memory_usage pids <<< "$stats"
     cpu_value=${cpu_percent%\%}
     effective_cores=$(awk -v cpu="$cpu_value" 'BEGIN { printf "%.2f", cpu / 100 }')
-    timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    timestamp_epoch_ms=$(date '+%s%3N')
+    timestamp_iso=$(date '+%Y-%m-%dT%H:%M:%S.%3N%:z')
 
-    printf '"%s","%s",%s,%s,"%s",%s\n' \
-        "$timestamp" \
+    printf '%s,"%s","%s",%s,%s,"%s",%s\n' \
+        "$timestamp_epoch_ms" \
+        "$timestamp_iso" \
         "$container" \
         "$cpu_value" \
         "$effective_cores" \

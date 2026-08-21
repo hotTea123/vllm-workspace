@@ -14,8 +14,9 @@
 | `exp/mm-npu-transfer` | CPU 与 NPU 之间的数据传输代价是多少？ |
 | `exp/mm-memory-kv` | 卸载可以释放多少 NPU 显存和 KV Cache 容量？ |
 | `exp/mm-concurrency` | 批处理、排队和尾时延如何随并发变化？ |
+| `zkx/mm-online-cpu` | 预热后的在线服务消耗多少 CPU 资源？ |
 
-其余六个分支是需要实际运行的实验。它们都基于 `exp/mm-common-base`，并保留
+可运行的实验分支基于 `exp/mm-common-base`，并保留
 以下公共字段：
 
 - 原始图片尺寸、格式和文件字节数；
@@ -92,3 +93,69 @@ python -m unittest \
 如需采集完整进程树的 CPU 和 NPU 利用率，应在主机侧同时运行 `pidstat`/
 `perf` 和 `npu-smi`。vLLM Worker 可能运行在独立进程中，因此仅统计父进程
 CPU 时间不具有代表性。
+
+## 预热后的在线 CPU 测量
+
+`zkx/mm-online-cpu` 分支只采集宿主机 CPU 资源、流式 TTFT、TPOT
+和同步后的 Encoder 整体时间，不重复采集离线基线已经获得的输入规模和
+Tensor 大小。
+
+在推理容器内启动服务并保存服务日志：
+
+```bash
+bash experiments/multimodal_cpu/start_online_cpu_server.sh \
+  --model /models/Qwen2.5-VL-72B-Instruct \
+  --tensor-parallel-size 8 \
+  --max-model-len 16635 \
+  --port 12346 \
+  -- --max-num-batched-tokens 16635 \
+  2>&1 | tee /results/online_cpu_server.log
+```
+
+启动脚本始终使用以下隔离配置：
+
+- `--mm-processor-cache-gb 0`；
+- `--no-enable-prefix-caching`；
+- `compile_mm_encoder=false`；
+- `cudagraph_mm_encoder=false`；
+- 通过 `--enable-mm-processor-stats` 启用同步 Encoder 计时。
+
+不能关闭请求内部的 Encoder Cache，因为 vLLM 需要它把 ViT 输出插入语言模型
+Prefill。客户端改为在每次请求中发送完全相同的图片，但设置唯一的媒体
+`uuid`。vLLM 使用该 UUID 作为 Encoder Cache 键，因此不同请求无法复用
+Encoder 结果。
+
+服务就绪后，在 Docker 宿主机执行：
+
+```bash
+bash experiments/multimodal_cpu/run_online_cpu_measurement.sh \
+  --container vllm-container \
+  --base-url http://127.0.0.1:12346 \
+  --model /models/Qwen2.5-VL-72B-Instruct \
+  --image /data/1-1024x576.jpg \
+  --warmups 4 \
+  --repeats 10 \
+  --output-tokens 100 \
+  --output-prefix /results/qwen72b_online_cpu
+```
+
+编排脚本会先完成全部 Warmup，再启动 `collect_host_cpu.sh`；第10个正式
+请求完成后立即停止 CPU 采集。输出：
+
+- `/results/qwen72b_online_cpu.requests.jsonl`：TTFT、TPOT、请求ID、
+  Media UUID 和毫秒级测量窗口；
+- `/results/qwen72b_online_cpu.host_cpu.csv`：容器 CPU 百分比、有效CPU核数、
+  内存用量和PID数。
+
+把服务日志放到宿主机可访问的路径后，生成缓存隔离和性能汇总：
+
+```bash
+python -m experiments.multimodal_cpu.analyze_online_cpu \
+  --requests /results/qwen72b_online_cpu.requests.jsonl \
+  --host-cpu /results/qwen72b_online_cpu.host_cpu.csv \
+  --server-log /results/online_cpu_server.log \
+  --output /results/qwen72b_online_cpu_report.md
+```
+
+分析脚本仅保留正式请求时间窗口内的 CPU 样本；每个正式请求都必须匹配
+一条 Encoder 计时记录，同一请求在多个 TP rank 上的 Encoder 时间取最大值。

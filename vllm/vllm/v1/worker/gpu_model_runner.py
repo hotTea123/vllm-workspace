@@ -4,6 +4,7 @@
 import functools
 import gc
 import itertools
+import json
 import threading
 import time
 from collections import defaultdict
@@ -7594,6 +7595,29 @@ class GPUModelRunner(
             torch.accelerator.synchronize()
             elapsed = time.perf_counter() - start_time
             batch_stats.encoder_forward_secs = elapsed
+
+            worker_rank = (
+                torch.distributed.get_rank()
+                if torch.distributed.is_initialized()
+                else 0
+            )
+            logger.info(
+                "MM_ENCODER_TIMING %s",
+                json.dumps(
+                    {
+                        "event": "mm_encoder_timing",
+                        "batch_id": batch_stats.batch_id,
+                        "worker_rank": worker_rank,
+                        "modality": batch_stats.modality,
+                        "request_ids": batch_stats.request_ids,
+                        "num_requests": batch_stats.num_requests,
+                        "num_items": batch_stats.num_items,
+                        "num_encoder_tokens": batch_stats.num_encoder_tokens,
+                        "encoder_forward_ms": elapsed * 1000,
+                    },
+                    separators=(",", ":"),
+                ),
+            )
 
             per_request_time = elapsed / max(len(group_request_ids), 1)
 
