@@ -71,6 +71,24 @@ Wall Time。`encoder_forward_ms` 是同步后的完整 Encoder 路径时间；�
 该分支还通过昇腾 `NPUWorker` 委托调用 Encoder 计时和 Batch 元数据 RPC，
 未在推理热路径中增加第二次设备同步。
 
+## 结果分析与测试
+
+使用 NPU 基线生成的 JSONL 输出输入规模、Encoder Tensor 规模和
+时延统计表：
+
+```bash
+python -m experiments.multimodal_cpu.analyze_npu_baseline \
+  --input /results/qwen25vl_72b_baseline.jsonl \
+  --output /results/qwen25vl_72b_baseline_report.md
+```
+
+运行分析脚本的单元测试：
+
+```bash
+python -m unittest \
+  experiments.multimodal_cpu.test_analyze_npu_baseline
+```
+
 如需采集完整进程树的 CPU 和 NPU 利用率，应在主机侧同时运行 `pidstat`/
 `perf` 和 `npu-smi`。vLLM Worker 可能运行在独立进程中，因此仅统计父进程
 CPU 时间不具有代表性。

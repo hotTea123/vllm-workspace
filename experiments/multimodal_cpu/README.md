@@ -76,6 +76,24 @@ an incomplete row if TTFT or TPOT is unavailable.
 The branch delegates encoder timing and batch-metadata RPCs through Ascend's
 `NPUWorker`; it does not add a second device synchronization to the hot path.
 
+## Result analysis and tests
+
+Generate the input-scale, encoder-tensor, and latency summary tables from an
+NPU baseline JSONL file:
+
+```bash
+python -m experiments.multimodal_cpu.analyze_npu_baseline \
+  --input /results/qwen25vl_72b_baseline.jsonl \
+  --output /results/qwen25vl_72b_baseline_report.md
+```
+
+Run the analyzer unit tests:
+
+```bash
+python -m unittest \
+  experiments.multimodal_cpu.test_analyze_npu_baseline
+```
+
 For full process-tree CPU and NPU utilization, run the experiment under the
 host's `pidstat`/`perf` and `npu-smi` collectors. Parent-process CPU time alone is
 not representative because vLLM workers may be separate processes.
